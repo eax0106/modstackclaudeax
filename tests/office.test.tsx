@@ -20,6 +20,7 @@ function world(on: any, classify: (text: string) => string | undefined) {
   }
   mock.clock(on, { now: 1_000 })
   on('command.register', async () => ({ value: undefined }))
+  on('tool.register', async () => ({ value: undefined }))
   on('session.model', async () => ({ value: SESSION_MODEL }))
   on('ui.status', async () => ({ value: undefined }))
   on('ui.open', async () => ({ value: { isPlaced: true } }))
@@ -237,4 +238,58 @@ test('a message typed in the main session card is routed and waits for an effort
   await run($, 'Continue the refactor', 'm1')
   expect(seen.sent).toEqual(['claude-opus-5-5'])
   expect(seen.efforts).toEqual(['high'])
+})
+
+test('tasks the model sets show in its card, on the roster and on the map', async ($, on) => {
+  world(on, () => 'simple')
+  on('tool.call', { tool: 'TodoWrite' }, (_$: unknown, e: { todos: unknown[] }) => ({ result: { oldTodos: [], newTodos: e.todos } }))
+  await $.session.start(START)
+
+  const ran = await $.tool.call({ tool: 'mcp__office-router__set_tasks', tasks: [
+    { subject: 'Plan the merge', status: 'completed' },
+    { subject: 'Move tasks into the office', status: 'in_progress' },
+    { subject: 'Push one mod', status: 'pending' },
+  ] } as never)
+  expect(JSON.stringify(ran.result)).toContain('1/3 of your tasks done')
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const pane = await $.ui.mount({ ...PANE, surface } as never)
+    await pane.press({ key: 'w-main' })
+    expect((await pane.find({ key: 'w-main' }))?.text).toContain('1/3')
+    expect(await pane.find({ type: 'Text', text: /^Tasks 1\/3$/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /◐ Move tasks into the office/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /✓ Plan the merge/ })).toBeDefined()
+    if (surface === 'desktop') expect(JSON.stringify(await pane.find({ type: 'Svg' }))).toContain('1/3')
+    await pane.unmount()
+  }
+
+  // A new list replaces the old one; a bad one is refused.
+  await $.tool.call({ tool: 'mcp__office-router__set_tasks', tasks: [{ subject: 'Push one mod', status: 'completed' }] } as never)
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+  expect(await pane.find({ type: 'Text', text: /^Tasks 1\/1$/ })).toBeDefined()
+  await pane.unmount()
+  const bad = await $.tool.call({ tool: 'mcp__office-router__set_tasks', tasks: [{ subject: 'x', status: 'done' }] } as never)
+  expect(JSON.stringify(bad.result)).toContain('"isError":true')
+
+  // The built-in todo tool, where a session has it, lands in the same list.
+  await $.tool.call({ tool: 'TodoWrite', todos: [{ content: 'Write docs', status: 'pending', activeForm: 'Writing docs' }] } as never)
+  const again = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+  expect(await again.find({ type: 'Text', text: /○ Write docs/ })).toBeDefined()
+  await again.unmount()
+})
+
+test('the strip shows the main session task progress and what it is doing now', async ($, on) => {
+  world(on, () => 'simple')
+  await $.tool.call({ tool: 'mcp__office-router__set_tasks', tasks: [
+    { subject: 'Plan', status: 'completed' },
+    { subject: 'Build the board', status: 'in_progress' },
+  ] } as never)
+  const strip = await $.ui.mount({
+    plugin: 'office-router',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100 },
+    surface: 'desktop',
+  } as never)
+  expect(await strip.find({ type: 'Text', text: /tasks 1\/2 · now: Build the board/ })).toBeDefined()
+  await strip.unmount()
 })

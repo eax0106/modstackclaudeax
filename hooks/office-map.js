@@ -169,7 +169,7 @@ function roam(seat, h) {
   }
 }
 
-function person(seat, isSelected) {
+function person(seat, isSelected, mine) {
   const { w, x, y } = seat
   const h = hash(w.id)
   const tier = tierOf(w.model)
@@ -231,6 +231,18 @@ function person(seat, isSelected) {
           .join('')}
       </g>`
       : ''
+  // The worker's own task progress: a ring that fills, done out of total.
+  const finished = mine.filter(t => t.status === 'completed').length
+  const ringLength = 2 * Math.PI * 6.5
+  const badge =
+    mine.length > 0
+      ? `<g transform="translate(46 17)">
+      <circle r="6.5" fill="${C.panel}" stroke="${C.mint}" stroke-opacity="0.15" stroke-width="2"/>
+      <circle r="6.5" fill="none" stroke="${C.mint}" stroke-width="2" stroke-linecap="round" transform="rotate(-90)" stroke-dasharray="${ringLength.toFixed(2)}" stroke-dashoffset="${ringLength.toFixed(2)}">
+        <animate attributeName="stroke-dashoffset" values="${ringLength.toFixed(2)};${(ringLength * (1 - finished / mine.length)).toFixed(2)}" dur="0.9s" begin="${(walkFor + 0.2).toFixed(2)}s" fill="freeze"/></circle>
+      <text x="10" y="3" font-size="7.5" font-weight="700" fill="${C.mint}" font-family="${FONT}">${finished}/${mine.length}</text>
+    </g>`
+      : ''
   const dot = { working: C.mint, idle: '#E9D58A', done: C.muted, error: C.error }[w.status]
   const tag = `<g transform="translate(0 17)">
     <rect x="-38" y="-8" width="76" height="15" rx="7.5" fill="${C.panel}" fill-opacity="0.92" stroke="${color}" stroke-opacity="${isSelected ? 0.9 : 0.3}"/>
@@ -258,6 +270,7 @@ function person(seat, isSelected) {
       ${alarm}
       ${bubble}
       ${tag}
+      ${badge}
     </g>
   </g>
 </g>`
@@ -328,7 +341,7 @@ function rooms() {
     <animateTransform attributeName="transform" type="rotate" values="-4 684 290;5 684 290;-4 684 290" dur="4s" repeatCount="indefinite"/></path>`
 }
 
-export function officeSvg(list, chosen, width, height, coreTier) {
+export function officeSvg(list, chosen, width, height, coreTier, tasks = []) {
   const { seats, hidden } = seatAll(list)
   const byDesk = new Map(seats.filter(s => s.desk !== undefined).map(s => [s.desk, s.w]))
   const working = list.filter(w => w.status === 'working').length
@@ -342,7 +355,7 @@ export function officeSvg(list, chosen, width, height, coreTier) {
   // People further down the floor are drawn later, so they stand in front.
   const people = [...seats]
     .sort((a, b) => a.y - b.y)
-    .map(s => person(s, s.w.id === chosen))
+    .map(s => person(s, s.w.id === chosen, tasks.filter(t => t.owner === s.w.id)))
     .join('\n')
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 720 440" font-family="${FONT}">

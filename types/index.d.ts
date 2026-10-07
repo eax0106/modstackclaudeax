@@ -30,6 +30,10 @@ export type Pending = {
 
 export type WorkerStatus = 'working' | 'idle' | 'done' | 'error'
 
+// A task the model set for itself; `owner` is the worker's id ('main' or an agent id).
+export type TaskStatus = 'pending' | 'in_progress' | 'completed'
+export type Task = { id: string; subject: string; status: TaskStatus; owner: string }
+
 // One line of the conversation shown in a worker's card.
 export type ChatLine = { from: 'you' | 'agent' | 'note'; text: string; at: number }
 
@@ -58,6 +62,7 @@ declare module 'claude-code' {
       pending: Pending | null
       workers: Worker[]
       selected: string
+      tasks: Task[]
     }
   }
 }

@@ -1,1 +1,0 @@
-{ "name": "task-tracker", "version": "0.2.0", "description": "Footer task count beside the prompt and a pane listing every task the model set this session", "author": { "name": "Havish Vardhan" }, "types": "./types/index.d.ts" }

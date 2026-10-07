@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import { officeSvg } from './office-map.js'
-import type { ChatLine, Effort, Pending, Route, RouteMode, Tier, Worker, WorkerStatus } from '../types'
+import type { ChatLine, Effort, Pending, Route, RouteMode, Task, Tier, Worker, WorkerStatus } from '../types'
 
 const PLUGIN = 'office-router'
 const PANE = 'office'
@@ -29,6 +29,15 @@ const routes = atom({ plugin: 'office-router', key: 'routes' } as const, [])
 const workers = atom({ plugin: 'office-router', key: 'workers' } as const, [])
 const selected = atom({ plugin: 'office-router', key: 'selected' } as const, MAIN)
 const pending = atom({ plugin: 'office-router', key: 'pending' } as const, null)
+const tasks = atom({ plugin: 'office-router', key: 'tasks' } as const, [])
+
+const OWN_TOOL = 'mcp__office-router__set_tasks'
+const STATUSES: readonly string[] = ['pending', 'in_progress', 'completed']
+const MARK = { pending: '○', in_progress: '◐', completed: '✓' } as const
+
+// Replace one agent's tasks under an id prefix, keeping everyone else's.
+const replaceOwned = (list: readonly Task[], prefix: string, next: Task[]) => [...list.filter(t => !t.id.startsWith(prefix)), ...next]
+const doneOf = (list: readonly Task[]) => `${list.filter(t => t.status === 'completed').length}/${list.length}`
 
 const snippet = (text: string, n: number) => {
   const flat = text.replace(/\s+/g, ' ').trim()
@@ -118,6 +127,31 @@ async function talk($: EngineInterface, id: string, value: string) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'office', description: 'Open the office pane: your session and its agents at work' })
+    await $.command.register({ name: 'tasks', description: 'Open the office on the main session and its task list' })
+    await $.tool.register({
+      name: 'set_tasks',
+      description:
+        'Record your task list so the person can follow it in the office. Use it for any work with 3 or more ' +
+        'steps: call it with the full list before starting, then again with the whole updated list each time a ' +
+        'task starts or finishes, keeping exactly one task in_progress. Each call replaces your previous list.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          tasks: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                subject: { type: 'string', description: 'Short imperative title' },
+                status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
+              },
+              required: ['subject', 'status'],
+            },
+          },
+        },
+        required: ['tasks'],
+      },
+    })
     await $.command.register({
       name: 'route',
       description: 'Model routing: /route auto | haiku | sonnet | opus | off (no argument shows the status)',
@@ -150,6 +184,59 @@ export const register: Register = on => {
   on('command.run', { command: 'office' }, async $ => {
     await $.ui.open(OFFICE)
     return { text: 'Office pane opened.' }
+  })
+
+  on('command.run', { command: 'tasks' }, async $ => {
+    await update($, selected, () => MAIN)
+    await $.ui.open(OFFICE)
+    return { text: 'Office opened on the main session and its tasks.' }
+  })
+
+  // The mod's own tool: the model sends its whole list, which replaces that agent's tasks.
+  on('tool.call', { tool: OWN_TOOL }, async ($, e) => {
+    const raw = (e as { tasks?: unknown }).tasks
+    const isValid =
+      Array.isArray(raw) &&
+      raw.every((t): t is { subject: string; status: Task['status'] } => typeof t?.subject === 'string' && STATUSES.includes(t?.status))
+    if (!isValid) {
+      return { result: { content: [{ type: 'text', text: 'tasks must be an array of { subject, status }.' }], isError: true } }
+    }
+    const owner = e.agentId ?? MAIN
+    const prefix = `own:${owner}:`
+    const mine: Task[] = raw.map((t, i) => ({ id: `${prefix}${i}`, subject: t.subject, status: t.status, owner }))
+    const list = await update($, tasks, all => replaceOwned(all, prefix, mine))
+    return { result: { content: [{ type: 'text', text: `Recorded. ${doneOf(list.filter(t => t.owner === owner))} of your tasks done.` }] } }
+  })
+
+  // Sessions that have the built-in todo and task tools are tracked too.
+  on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
+    const ran = await next(e)
+    if (ran.deny !== undefined || ran.isError) return ran
+    const owner = e.agentId ?? MAIN
+    const todos: Task[] = e.todos.map((t, i) => ({ id: `todo:${owner}:${i}`, subject: t.content, status: t.status, owner }))
+    await update($, tasks, list => replaceOwned(list, `todo:${owner}:`, todos))
+    return ran
+  })
+
+  on('tool.call', { tool: 'TaskCreate' }, async ($, e, next) => {
+    const ran = await next(e)
+    if (ran.deny !== undefined || ran.isError) return ran
+    const task: Task = { id: `task:${ran.result.task.id}`, subject: e.subject, status: 'pending', owner: e.agentId ?? MAIN }
+    await update($, tasks, list => [...list.filter(t => t.id !== task.id), task])
+    return ran
+  })
+
+  on('tool.call', { tool: 'TaskUpdate' }, async ($, e, next) => {
+    const ran = await next(e)
+    if (ran.deny !== undefined || ran.isError || !ran.result.success) return ran
+    const id = `task:${e.taskId}`
+    const status = e.status
+    await update($, tasks, list =>
+      status === 'deleted'
+        ? list.filter(t => t.id !== id)
+        : list.map(t => (t.id === id ? { ...t, subject: e.subject ?? t.subject, status: status ?? t.status } : t)),
+    )
+    return ran
   })
 
   on('command.run', { command: 'route' }, async ($, e) => {
@@ -290,6 +377,8 @@ export const register: Register = on => {
     const cur = await read($, current)
     const m = await read($, mode)
     const working = (await read($, workers)).filter(w => w.status === 'working').length
+    const mine = (await read($, tasks)).filter(t => t.owner === MAIN)
+    const doing = mine.find(t => t.status === 'in_progress')
     return (
       <Box flexDirection="row" gap={2}>
         <Box flexDirection="row" gap={1}>
@@ -302,6 +391,8 @@ export const register: Register = on => {
           <Text dimColor>
             routing {m}
             {cur?.tier ? ` · last: ${cur.tier}` : ''} · {working} working
+            {mine.length > 0 ? ` · tasks ${doneOf(mine)}` : ''}
+            {doing ? ` · now: ${snippet(doing.subject, 40)}` : ''}
           </Text>
         </Box>
         {below}
@@ -347,6 +438,8 @@ export const register: Register = on => {
     const recent = (await read($, routes)).slice(-6).reverse()
     const now = await $.clock.now()
     const w = list.find(one => one.id === chosen) ?? list[0]
+    const allTasks = await read($, tasks)
+    const tasksOf = (id: string) => allTasks.filter(t => t.owner === id)
     const { Box, Text, Button } = $.ui.resolve(e)
 
     const roster = (
@@ -354,7 +447,7 @@ export const register: Register = on => {
         {list.map(one => (
           <Button
             key={`w-${one.id}`}
-            label={`${{ working: '●', idle: '○', done: '✓', error: '!' }[one.status]} ${snippet(one.name, 22)}`}
+            label={`${{ working: '●', idle: '○', done: '✓', error: '!' }[one.status]} ${snippet(one.name, 22)}${tasksOf(one.id).length > 0 ? ` · ${doneOf(tasksOf(one.id))}` : ''}`}
             variant={one.id === w?.id ? 'primary' : 'secondary'}
             onPress={() => update($, selected, () => one.id)}
           />
@@ -386,6 +479,12 @@ export const register: Register = on => {
         <Text dimColor>
           Last tool: {w.lastTool ?? 'none'} · {w.tools} tool calls · running {since(w.startedAt, now)}
         </Text>
+        {tasksOf(w.id).length > 0 && <Text bold>Tasks {doneOf(tasksOf(w.id))}</Text>}
+        {tasksOf(w.id).map(t => (
+          <Text key={t.id} wrap="wrap" bold={t.status === 'in_progress'} dimColor={t.status === 'completed'}>
+            {MARK[t.status]} {t.subject}
+          </Text>
+        ))}
         {(w.chat ?? []).map((line, i) => (
           <Text key={`chat-${i}`} wrap="wrap" dimColor={line.from === 'note'}>
             {line.from === 'you' ? 'You' : line.from === 'agent' ? w.name : 'Note'}: {line.text}
@@ -427,7 +526,7 @@ export const register: Register = on => {
         <Box flexDirection="column" gap={1}>
           <Svg
             key="map"
-            source={officeSvg(list, w?.id ?? MAIN, width, height, (await read($, current))?.tier ?? m)}
+            source={officeSvg(list, w?.id ?? MAIN, width, height, (await read($, current))?.tier ?? m, allTasks)}
             width={width}
             height={height}
             alt={`Office with ${list.length} workers`}

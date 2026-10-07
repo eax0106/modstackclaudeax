@@ -1,8 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, Register } from 'claude-code'
 
+import { CACHE_VIEW, cachePanelSvg } from './cache-panel.js'
 import { officeSvg } from './office-map.js'
-import type { AgentPick, ChatLine, Effort, Pending, Plan, PlanTask, Route, RouteMode, Task, Tier, Worker, WorkerStatus } from '../types'
+import type { AgentPick, CacheState, ChatLine, Effort, Pending, Plan, PlanTask, Route, RouteMode, Task, Tier, Worker, WorkerStatus } from '../types'
 
 const PLUGIN = 'office-router'
 const PANE = 'office'
@@ -22,6 +23,10 @@ const TIER_OF: Record<string, Tier> = { simple: 'haiku', moderate: 'sonnet', com
 const MODES: readonly RouteMode[] = ['auto', 'haiku', 'sonnet', 'opus', 'off']
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const RECOMMEND: Record<Tier, Effort> = { haiku: 'low', sonnet: 'medium', opus: 'high' }
+// Measured on the desktop: a pane column is about 8 px wide and a row about 16 px tall.
+const COLUMN_PX = 8
+const ROW_PX = 16
+
 // The ALTERX palette the office map uses, for the native parts of the panes.
 const UI = { panel: '#06110B', edge: '#1E3A2B', text: '#E8F7EE', muted: '#91A89B', mint: '#9FFFC0' }
 const TIER_UI: Record<Tier, string> = { haiku: '#9FFFC0', sonnet: '#7FE3FF', opus: '#C9A8FF' }
@@ -62,6 +67,20 @@ const OWN_TOOL = 'mcp__office-router__set_tasks'
 const PLAN_TOOL = 'mcp__office-router__propose_plan'
 const PLAN_PANE = 'plan'
 const plan = atom({ plugin: 'office-router', key: 'plan' } as const, null)
+const NEW_CACHE: CacheState = {
+  warm: true,
+  ttl: 3600,
+  lastAt: null,
+  pings: 0,
+  warmRead: 0,
+  pingLog: [],
+  totals: { read: 0, written: 0, fresh: 0 },
+  blocks: null,
+}
+const cache = atom({ plugin: 'office-router', key: 'cache' } as const, NEW_CACHE)
+// Warming pays while pings cost less than re-writing the cache: a write costs
+// 1.25x the prompt (2x for the 1-hour cache) and each warm read 0.1x.
+const warmCap = (ttl: number) => (ttl <= 300 ? 10 : 3)
 const TIER_RANK: Record<Tier, number> = { haiku: 0, sonnet: 1, opus: 2 }
 const EFFORT_RANK: Record<Effort, number> = { low: 0, medium: 1, high: 2, xhigh: 3, max: 4 }
 // An agent the approved plan started is named `plan:<n> <title>` (or `plan:all`).
@@ -195,6 +214,19 @@ function officeMap(list: Worker[], chosen: string, width: number, height: number
   return lastMap.svg
 }
 
+let lastCache = { key: '', svg: '' }
+
+// The cache panel, rebuilt only when its record or size changes. The ring's start
+// is taken when it is rebuilt and then runs down on its own.
+function cachePanel(c: CacheState, now: number, width: number, height: number) {
+  const key = JSON.stringify([c, width, height])
+  if (key !== lastCache.key) {
+    const left = c.lastAt === null ? 0 : Math.max(0, c.ttl - (now - c.lastAt) / 1000)
+    lastCache = { key, svg: cachePanelSvg(c, left, width, height) }
+  }
+  return lastCache.svg
+}
+
 // The approved model and effort for an agent the plan named, if any.
 function planChoice(p: Plan | null, description: string): { model: Tier; effort: Effort } | undefined {
   const match = PLAN_NAME.exec(description)
@@ -284,12 +316,49 @@ function mainDropdowns(
   )
 }
 
+// Groups the context's categories into what the cache panel shows.
+function cacheBlocks(categories: readonly { name: string; tokens: number; kind: string }[]) {
+  const blocks = { system: 0, project: 0, conversation: 0 }
+  for (const c of categories) {
+    if (c.kind !== 'used' && c.kind !== 'deferred') continue
+    if (/message/i.test(c.name)) blocks.conversation += c.tokens
+    else if (/memory|skill|agent|claude\.md/i.test(c.name)) blocks.project += c.tokens
+    else blocks.system += c.tokens
+  }
+  return blocks
+}
+
+// Keeps the cache warm while the session sits idle: one tiny fork over the
+// session's own transcript, served from the cache, which adds nothing to the
+// conversation. Fires just before the cache expires, never while a turn runs,
+// and stops at the cap until the person sends something again.
+async function warmTick($: EngineInterface) {
+  const c = await read($, cache)
+  if (!c.warm || c.lastAt === null || c.pings >= warmCap(c.ttl)) return
+  if ((await read($, workers)).some(w => w.id === MAIN && w.status === 'working')) return
+  const now = await $.clock.now()
+  if (now - c.lastAt < (c.ttl - 60) * 1000) return
+  const blocks = c.blocks
+  if (blocks !== null && blocks.system + blocks.project + blocks.conversation < 5000) return
+  const r = await $.model.fork({ prompt: 'Reply with the single word: ok' })
+  const readTokens = 'usage' in r && r.usage ? r.usage.cache_read_input_tokens : 0
+  await update($, cache, s => ({
+    ...s,
+    lastAt: r.isAnswered ? now : s.lastAt,
+    pings: s.pings + 1,
+    warmRead: s.warmRead + readTokens,
+    pingLog: [...s.pingLog, { at: now, read: readTokens, ok: r.isAnswered }].slice(-5),
+  }))
+}
+
 // ---------------------------------------------------------------- hooks
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'office', description: 'Open the office pane: your session and its agents at work' })
     await $.command.register({ name: 'tasks', description: 'Open the office on the main session and its task list' })
+    await $.command.register({ name: 'cache', description: 'Open the office on the prompt cache panel; /cache warm on|off' })
+    $.clock.every(30_000, () => void warmTick($).catch(() => undefined))
     await $.tool.register({
       name: 'set_tasks',
       description:
@@ -374,6 +443,16 @@ export const register: Register = on => {
   on('command.run', { command: 'office' }, async $ => {
     await $.ui.open(OFFICE)
     return { text: 'Office pane opened.' }
+  })
+
+  on('command.run', { command: 'cache' }, async ($, e) => {
+    const arg = e.args.trim().toLowerCase()
+    if (arg === 'warm on' || arg === 'warm off') {
+      await update($, cache, c => ({ ...c, warm: arg === 'warm on' }))
+      return { text: `Cache warmer ${arg === 'warm on' ? 'on' : 'off'}.` }
+    }
+    await $.ui.open(OFFICE)
+    return { text: 'Office opened; the cache panel is under the map.' }
   })
 
   on('command.run', { command: 'tasks' }, async $ => {
@@ -528,6 +607,7 @@ export const register: Register = on => {
   // Apply the person's pick to the turn their prompt starts.
   on('turn.start', async ($, e, next) => {
     const now = await $.clock.now()
+    await update($, cache, c => (c.pings === 0 ? c : { ...c, pings: 0 }))
     const held = await read($, pending)
     if (held !== null && held.choice !== null && held.text === e.text) {
       const route: Route = {
@@ -623,6 +703,25 @@ export const register: Register = on => {
     const status: WorkerStatus = e.reason === 'error' ? 'error' : id === MAIN ? 'idle' : 'done'
     await touch($, id, { status })
     const u = e.usage
+    if (u && e.agentId === undefined) {
+      const end = await $.clock.now()
+      await update($, cache, c => ({
+        ...c,
+        lastAt: end,
+        totals: {
+          read: c.totals.read + (u.cache_read_input_tokens ?? 0),
+          written: c.totals.written + (u.cache_creation_input_tokens ?? 0),
+          fresh: c.totals.fresh + (u.input_tokens ?? 0),
+        },
+      }))
+      try {
+        const usage = await $.session.usage({ breakdown: 'full' })
+        const categories = usage.context.breakdown?.categories
+        if (categories) await update($, cache, c => ({ ...c, blocks: cacheBlocks(categories) }))
+      } catch {
+        // No breakdown this turn; the panel keeps the last one.
+      }
+    }
     if (u) {
       const used = (u.input_tokens ?? 0) + (u.output_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0)
       await update($, workers, list => list.map(w => (w.id === id ? { ...w, tokens: (w.tokens ?? 0) + used } : w)))
@@ -774,7 +873,7 @@ export const register: Register = on => {
     const list = await read($, workers)
     const chosen = await read($, selected)
     const m = await read($, mode)
-    const recent = (await read($, routes)).slice(-6).reverse()
+    const recent = (await read($, routes)).slice(-3).reverse()
     const w = list.find(one => one.id === chosen) ?? list[0]
     const allTasks = await read($, tasks)
     const tasksOf = (id: string) => allTasks.filter(t => t.owner === id)
@@ -868,7 +967,7 @@ export const register: Register = on => {
         {mineTasks.length > 0 && (
           <Box flexDirection="column">
             <Text color={UI.muted}>TASKS {doneOf(mineTasks)}</Text>
-            {mineTasks.map(t => (
+            {mineTasks.slice(0, 6).map(t => (
               <Text
                 key={t.id}
                 wrap="wrap"
@@ -878,17 +977,18 @@ export const register: Register = on => {
                 {MARK[t.status]} {t.subject}
               </Text>
             ))}
+            {mineTasks.length > 6 && <Text color={UI.muted}>+{mineTasks.length - 6} more</Text>}
           </Box>
         )}
         {(w.chat ?? []).length > 0 && (
           <Box flexDirection="column">
             <Text color={UI.muted}>CONVERSATION</Text>
-            {(w.chat ?? []).map((line, i) => (
+            {(w.chat ?? []).slice(-4).map((line, i) => (
               <Text key={`chat-${i}`} wrap="wrap" color={line.from === 'agent' ? UI.mint : line.from === 'note' ? UI.muted : UI.text}>
                 <Text bold color={line.from === 'agent' ? UI.mint : UI.muted}>
                   {line.from === 'you' ? 'You' : line.from === 'agent' ? w.name : 'Note'}:
                 </Text>{' '}
-                {line.text}
+                {snippet(line.text, 180)}
               </Text>
             ))}
           </Box>
@@ -926,21 +1026,78 @@ export const register: Register = on => {
     )
 
     if (e.surface === 'desktop') {
-      const { Svg } = $.ui.resolve(e)
-      // The desktop frames an interactive SVG at a fixed height unless told its size,
-      // so size it to the pane: about 7 px per column, kept at the drawing's 720:440.
-      const width = Math.min(2400, Math.max(560, Math.round(e.props.bodyColumns * 7)))
-      const height = Math.round((width * 440) / 720)
-      return (
-        <Box flexDirection="column" gap={1}>
+      const { Svg, Select } = $.ui.resolve(e)
+      const c = await read($, cache)
+      // The desktop scrolls a pane through the engine: every scroll step redraws the
+      // whole pane, which reloads the map and makes the scroll stutter. So the pane is
+      // laid out to fit its window with nothing to scroll. Wide: the map and the cache
+      // panel on the left, exactly as wide as the map, the workers and the card on the
+      // right. Narrow: one column.
+      const columns = e.props.bodyColumns
+      const rows = e.props.scroll.bodyRows
+      const isWide = columns >= 110
+      // The left column holds the map (720:440), the cache panel (720:300) and a row
+      // of controls, with gaps: about 5 rows besides the two drawings.
+      const tall = (CACHE_VIEW.height + 440) / 720
+      const fitWidth = Math.floor(((rows - 5) * ROW_PX) / tall)
+      const width = Math.max(320, Math.min(fitWidth, Math.floor((isWide ? columns * 0.62 : columns) * COLUMN_PX)))
+      const mapHeight = Math.round((width * 440) / 720)
+      const cacheHeight = Math.round((width * CACHE_VIEW.height) / 720)
+      const leftColumns = Math.ceil(width / COLUMN_PX)
+      const now = await $.clock.now()
+      const left = (
+        <Box flexDirection="column" gap={1} width={isWide ? leftColumns : undefined}>
           <Svg
             key="map"
-            source={officeMap(list, w?.id ?? MAIN, width, height, (await read($, current))?.tier ?? m, allTasks)}
+            source={officeMap(list, w?.id ?? MAIN, width, mapHeight, (await read($, current))?.tier ?? m, allTasks)}
             width={width}
-            height={height}
+            height={mapHeight}
             alt={`Office with ${list.length} workers`}
             isInteractive
           />
+          <Svg
+            key="cache"
+            source={cachePanel(c, now, width, cacheHeight)}
+            width={width}
+            height={cacheHeight}
+            alt={`Prompt cache: warmer ${c.warm ? 'on' : 'off'}`}
+            isInteractive
+          />
+          <Box flexDirection="row" gap={1}>
+            <Button
+              key="warm-toggle"
+              label={c.warm ? '● Warmer on' : '○ Warmer off'}
+              variant={c.warm ? 'primary' : 'secondary'}
+              onPress={() => void update($, cache, x => ({ ...x, warm: !x.warm }))}
+            />
+            <Select
+              key="warm-ttl"
+              label="Cache"
+              options={[
+                { value: '3600', label: '1 hour' },
+                { value: '300', label: '5 minutes' },
+              ]}
+              value={String(c.ttl)}
+              onSelect={value => void update($, cache, x => ({ ...x, ttl: Number(value), pings: 0 }))}
+            />
+          </Box>
+        </Box>
+      )
+      if (isWide) {
+        return (
+          <Box flexDirection="row" gap={2}>
+            {left}
+            <Box flexDirection="column" gap={1} width={columns - leftColumns - 2}>
+              {roster}
+              {detail}
+              {routing}
+            </Box>
+          </Box>
+        )
+      }
+      return (
+        <Box flexDirection="column" gap={1}>
+          {left}
           {roster}
           {detail}
           {routing}

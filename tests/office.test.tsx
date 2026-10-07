@@ -7,7 +7,8 @@ type Mount = any
 const SESSION_MODEL = 'claude-opus-5-5'
 const SESSION_EFFORT = 'high'
 const START = { source: 'startup', cwd: '/tmp', surface: 'desktop', isInteractive: true } as never
-const PANE = { plugin: 'office-router', component: 'Pane', requestId: 'office', props: { bodyColumns: 100 } } as const
+// As the desktop sends it: a docked pane, its scroll window and its width.
+const PANE = { plugin: 'office-router', component: 'Pane', requestId: 'office', props: { bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 43 } } } as const
 const PICKER = { plugin: 'office-router', component: 'Pane', requestId: 'effort', props: { bodyColumns: 100 } } as const
 const MODE = { plugin: 'office-router', component: 'SessionMode', props: { modes: ['auto'] } } as const
 
@@ -23,6 +24,7 @@ function world(on: any, classify: (text: string) => string | undefined) {
     spawned: [] as { description: string; model?: string }[],
     agents: [] as { id: string; description: string; type: string; status: string }[],
     asked: 0,
+    forks: 0,
   }
   const clock = mock.clock(on, { now: 1_000 })
   on('command.register', async () => ({ value: undefined }))
@@ -52,6 +54,28 @@ function world(on: any, classify: (text: string) => string | undefined) {
   })
   on('agent.list', async () => ({ value: seen.agents }))
   on('turn.complete', async (_$: unknown, e: { answer?: string }) => ({ text: e.answer ?? '' }))
+  on('model.fork', async () => {
+    seen.forks += 1
+    return { value: { isAnswered: true, text: 'ok', usage: { input_tokens: 4, output_tokens: 1, cache_read_input_tokens: 40_000, cache_creation_input_tokens: 0 } } }
+  })
+  on('session.usage', async () => ({
+    value: {
+      startedAt: 0,
+      rateLimits: [],
+      context: {
+        window: 200_000,
+        breakdown: {
+          categories: [
+            { name: 'System prompt', tokens: 6000, kind: 'used' },
+            { name: 'System tools', tokens: 14_000, kind: 'used' },
+            { name: 'Memory files', tokens: 3000, kind: 'used' },
+            { name: 'Messages', tokens: 20_000, kind: 'used' },
+            { name: 'Free space', tokens: 150_000, kind: 'free' },
+          ],
+        },
+      },
+    },
+  }))
   on('prompt.fill', async (_$: unknown, e: { text: string }) => {
     seen.filled.push(e.text)
     return { value: undefined }
@@ -497,7 +521,7 @@ test('redrawing the office with nothing changed hands back the same map', async 
   const first = (await $.ui.mount({ ...PANE, surface: 'desktop' } as never)) as Mount
   const before = JSON.stringify(await first.find({ type: 'Svg' }))
   await first.unmount()
-  const again = (await $.ui.mount({ ...PANE, props: { bodyColumns: 100, scroll: { top: 40 } } , surface: 'desktop' } as never)) as Mount
+  const again = (await $.ui.mount({ ...PANE, props: { ...PANE.props, scroll: { offset: 4, bodyRows: 43 } }, surface: 'desktop' } as never)) as Mount
   expect(JSON.stringify(await again.find({ type: 'Svg' }))).toBe(before)
   await again.unmount()
 
@@ -523,7 +547,62 @@ test('a scroll a minute later redraws the whole office pane identically', async 
   const before = await drawn(first)
   await first.unmount()
   await seen.clock.advance(60_000)
-  const again = (await $.ui.mount({ ...PANE, props: { bodyColumns: 100, scroll: { top: 120 } }, surface: 'desktop' } as never)) as Mount
+  const again = (await $.ui.mount({ ...PANE, props: { ...PANE.props, scroll: { offset: 9, bodyRows: 43 } }, surface: 'desktop' } as never)) as Mount
   expect(await drawn(again)).toBe(before)
   await again.unmount()
+})
+
+test('a wide desktop pane fits its window: map and cache on the left, the card on the right', async ($, on) => {
+  world(on, () => 'simple')
+  await $.session.start(START)
+  // The pane the desktop docked in the scroll test: 149 columns, 43 rows (about 8 px x 16 px each).
+  const pane = (await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 149 }, surface: 'desktop' } as never)) as Mount
+  const [map, panel] = (await pane.findAll({ type: 'Svg' })) as { props: { width: number; height: number } }[]
+  expect(map!.props.height + panel!.props.height + 5 * 16).toBeLessThanOrEqual(43 * 16)
+  expect(map!.props.width).toBeLessThanOrEqual(149 * 0.62 * 8)
+  expect(panel!.props.width).toBe(map!.props.width)
+  expect(JSON.stringify(await pane.drawn())).toContain('"flexDirection":"row"')
+  await pane.unmount()
+})
+
+const mainTurnEnds = ($: any, usage: Record<string, number>) =>
+  $.turn.complete({ turnId: 'c', reason: 'answer', answer: '', durationMs: 1, isAborted: false, usage: { model: SESSION_MODEL, ...usage } } as never)
+
+test('the cache panel shows the hit rate and what the context is made of', async ($, on) => {
+  world(on, () => 'simple')
+  await $.session.start(START)
+  await mainTurnEnds($, { input_tokens: 1000, output_tokens: 50, cache_read_input_tokens: 36_000, cache_creation_input_tokens: 3000 })
+  const pane = (await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 149 }, surface: 'desktop' } as never)) as Mount
+  const panel = JSON.stringify((await pane.findAll({ type: 'Svg' }))[1])
+  // 36k read of 40k sent: 90%. System 20k (prompt + tools), project 3k (memory), conversation 20k.
+  for (const text of ['90%', 'SYSTEM', '20.0k', 'PROJECT', '3.0k', 'CONVERSATION', 'WARMER ON', 'TTL 1 HOUR']) expect(panel).toContain(text)
+  expect((await pane.find({ key: 'warm-toggle' }))?.text).toBe('● Warmer on')
+  await pane.press({ key: 'warm-toggle' })
+  expect((await pane.find({ key: 'warm-toggle' }))?.text).toBe('○ Warmer off')
+  await pane.unmount()
+})
+
+test('the warmer pings once just before the cache expires, then stops at its cap', async ($, on) => {
+  const seen = world(on, () => 'simple')
+  await $.session.start(START)
+  await mainTurnEnds($, { input_tokens: 1000, output_tokens: 50, cache_read_input_tokens: 36_000, cache_creation_input_tokens: 3000 })
+  // Idle 58 minutes of a 1-hour cache: nothing yet.
+  await seen.clock.advance(58 * 60_000)
+  expect(seen.forks).toBe(0)
+  // Past 59 minutes: one ping, and the cache counts as fresh again.
+  await seen.clock.advance(90_000)
+  expect(seen.forks).toBe(1)
+  expect(seen.entered).toEqual([])
+  // Three pings for the 1-hour cache, then it stops.
+  await seen.clock.advance(4 * 60 * 60_000)
+  expect(seen.forks).toBe(3)
+})
+
+test('the warmer does nothing when it is off', async ($, on) => {
+  const seen = world(on, () => 'simple')
+  await $.session.start(START)
+  await mainTurnEnds($, { input_tokens: 1000, output_tokens: 50, cache_read_input_tokens: 36_000, cache_creation_input_tokens: 3000 })
+  await $.command.run({ command: 'cache', args: 'warm off' } as never)
+  await seen.clock.advance(3 * 60 * 60_000)
+  expect(seen.forks).toBe(0)
 })

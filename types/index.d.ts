@@ -40,6 +40,24 @@ export type Plan = {
   tasks: PlanTask[]
 }
 
+// The main session's prompt-cache record and its warmer.
+export type CacheState = {
+  // On by default; the person's toggle turns it off.
+  warm: boolean
+  // Seconds the cache lives: 3600 (Claude Code's 1-hour cache) or 300.
+  ttl: number
+  // When the cache was last written or read: a main turn's end or a warm ping.
+  lastAt: number | null
+  // Pings since the person last sent anything; capped.
+  pings: number
+  warmRead: number
+  pingLog: { at: number; read: number; ok: boolean }[]
+  // Input tokens over the main session's turns: read from the cache, written to it, sent fresh.
+  totals: { read: number; written: number; fresh: number }
+  // What the context is made of, from the last turn's usage breakdown.
+  blocks: { system: number; project: number; conversation: number } | null
+}
+
 // A typed prompt held until the person picks its effort.
 export type Pending = {
   text: string
@@ -94,6 +112,7 @@ declare module 'claude-code' {
       mainEffort: Effort | 'session' | null
       agentPicks: Record<string, AgentPick>
       plan: Plan | null
+      cache: CacheState
     }
   }
 }

@@ -1,6 +1,6 @@
 # Office + Model Routing mod for Claude Code
 
-A Claude Code mod (a plugin of function hooks) with four jobs:
+A Claude Code mod (a plugin of function hooks) with five jobs:
 
 1. **Model routing.** Before each prompt you type, Haiku rates how hard it is and picks the model: simple → Haiku 4.5, moderate → Sonnet 5.5, complex → Opus 5.5.
 2. **Effort is always yours.** Your first prompt is held until you pick an effort level in a small dialog. The dialog recommends one (Haiku → low, Sonnet → medium, Opus → high), and nothing runs until you click. Follow-up prompts then keep that effort and the model the first prompt went to, with no dialog. To change either, use the **Model** and **Effort** dropdowns above the prompt box before you send.
@@ -8,6 +8,8 @@ A Claude Code mod (a plugin of function hooks) with four jobs:
 3. **The model tracks its own tasks.** When it plans work of 3 or more steps, the model records the list with the mod's `set_tasks` tool (it sees it as `mcp__office-router__set_tasks`), and updates it as each task starts and finishes. The main session and every subagent keep their own list. Sessions with Claude Code's built-in `TodoWrite`, `TaskCreate` or `TaskUpdate` tools are tracked too.
 
 4. **Big requests become a plan you approve.** When a request has clearly separate parts of different difficulty (a master prompt, a multi-part build), the model proposes a plan with the mod's `propose_plan` tool. Each task gets its own agent, a model (Haiku, Sonnet or Opus) and an effort level, and can wait for other tasks to finish first. An **Approve plan** window lists every task, with a Model and an Effort dropdown and a Drop button on each. Choose **Approve**, **Run as one agent** or **Cancel**. Nothing starts until you approve. The main session then starts the agents by their plan names, the mod gives each one the model and effort you approved, and the main session combines their results into one answer. Smaller requests are not split.
+
+5. **The prompt cache, shown and kept warm.** A cache panel under the office map shows the hit rate (input tokens read from the cache over all input sent), tokens saved, tokens read and written, and what the context is made of (system, project, conversation), with a ring that runs down to the cache's expiry. A **warmer**, on by default, keeps the cache alive while the session sits idle: just before the cache would expire it sends one tiny question over the session's own transcript (`$.model.fork`), which is served from the cache and adds nothing to the conversation. It never pings while a turn runs, and it stops after 3 pings for the 1-hour cache (10 for the 5-minute one) until you send something again, because past that, letting the cache expire costs less than warming it. Every ping is shown in the panel. The **Warmer on/off** button and the **Cache** dropdown (1 hour or 5 minutes) sit under the panel.
 
 All of it lives in one **Office**: a live, animated map of your session and its subagents.
 
@@ -59,6 +61,7 @@ claude --plugin-dir ~/.claude/mods/office-router
 | --- | --- |
 | Open the office | the **Open office** button above the prompt box, the **Office** label in the footer, or `/office` |
 | See the tasks | `/tasks` opens the office on the main session's task list; the strip above the prompt shows `tasks 2/4 · now: <task>`; click any worker for its own list |
+| See or warm the cache | the panel under the office map; **Warmer on/off** button; **Cache** 1 hour / 5 minutes; `/cache`, `/cache warm on`, `/cache warm off` |
 | Talk to an agent | click its name under the map, type in the box at the bottom of its card, press **Send** |
 | Pick the effort for a prompt | the first time, click a level in the **Choose effort** dialog, or press 1–6 (6 keeps your current effort); after that, the **Effort** dropdown above the prompt box (**ask me** brings the dialog back) |
 | Change the model for the next prompt | the **Model** dropdown above the prompt box (**auto-route** re-routes every prompt) |
@@ -85,6 +88,8 @@ Routing starts in `auto` in every new session. `/route off` lasts only for the s
 - Tasks the model set before the mod loaded do not appear, `/clear` keeps the old tasks, and the model records tasks only when the tool's description persuades it to (work of 3 or more steps).
 - The office shows this session and its subagents only, so you can talk only to this session's agents. Other sessions are not visible to a mod yet.
 - The mobile app draws no text field yet, so there you can read a worker's conversation but not reply.
+- On a wide pane the office fits its window with nothing to scroll: the map and the cache panel on the left, the workers, the card and routing on the right. The desktop scrolls a mod's pane by asking it to redraw, one row at a time, which reloads the map and stutters, so the layout avoids scrolling altogether.
+- The warmer's pings count against your usage like any request. Claude Code sessions usually keep their cache for 1 hour, so the default warms at 59 minutes idle.
 - The office redraws only when something it shows changes (a worker's status, model, tool or task, a task's progress, the selected worker). Scrolling the pane hands the desktop an identical drawing, so the map keeps playing. When something does change, the ambient animations restart, and a walk cut short shows the worker at its destination.
 - The mod forgets where workers stood when it reloads, so the next drawing walks everyone in from the door again.
 
@@ -102,6 +107,7 @@ The tests cover routing to each model, the held prompt and the effort dialog, th
 | `.claude-plugin/plugin.json` | the manifest |
 | `hooks/hooks.json` | names the hooks module |
 | `hooks/register.tsx` | the hooks: routing, the effort dialog and dropdowns, the `propose_plan` and `set_tasks` tools, todo tracking, the office state, the buttons and panes |
+| `hooks/cache-panel.js` | the cache panel: hit-rate ring running down to expiry, context bars, warmer state |
 | `hooks/office-map.js` | the animated office map: lanes, walking and roaming (SVG with SMIL animation, in the ALTERX design language) |
 | `types/index.d.ts` | the mod's state contract |
 | `tests/office.test.tsx` | the test suite |

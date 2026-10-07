@@ -22,6 +22,16 @@ const TIER_OF: Record<string, Tier> = { simple: 'haiku', moderate: 'sonnet', com
 const MODES: readonly RouteMode[] = ['auto', 'haiku', 'sonnet', 'opus', 'off']
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const RECOMMEND: Record<Tier, Effort> = { haiku: 'low', sonnet: 'medium', opus: 'high' }
+// The ALTERX palette the office map uses, for the native parts of the panes.
+const UI = { panel: '#06110B', edge: '#1E3A2B', text: '#E8F7EE', muted: '#91A89B', mint: '#9FFFC0' }
+const TIER_UI: Record<Tier, string> = { haiku: '#9FFFC0', sonnet: '#7FE3FF', opus: '#C9A8FF' }
+const STATUS_COLOR: Record<WorkerStatus, string> = { working: '#9FFFC0', idle: '#E9D58A', done: '#91A89B', error: '#FF6B6B' }
+const modelName = (model: string | null) => {
+  if (model === null) return 'MODEL UNKNOWN'
+  const tier = (['haiku', 'sonnet', 'opus'] as const).find(t => model.includes(t))
+  const version = /(\d+)-(\d+)/.exec(model)
+  return tier ? `${tier.toUpperCase()}${version ? ` ${version[1]}.${version[2]}` : ''}` : model.toUpperCase()
+}
 
 const mode = atom({ plugin: 'office-router', key: 'mode' } as const, 'auto')
 const current = atom({ plugin: 'office-router', key: 'current' } as const, null)
@@ -66,11 +76,6 @@ const doneOf = (list: readonly Task[]) => `${list.filter(t => t.status === 'comp
 const snippet = (text: string, n: number) => {
   const flat = text.replace(/\s+/g, ' ').trim()
   return flat.length > n ? flat.slice(0, n - 1) + '…' : flat
-}
-
-const since = (from: number, now: number) => {
-  const s = Math.max(0, Math.round((now - from) / 1000))
-  return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
 }
 
 async function touch($: EngineInterface, id: string, patch: Partial<Worker>) {
@@ -169,6 +174,25 @@ async function talk($: EngineInterface, id: string, value: string) {
   const sent = await $.session.send({ to: { agentId: id }, text })
   if (sent.isDelivered) await touch($, id, { status: 'working' })
   else await say($, id, 'note', `Not delivered: ${sent.reason}`)
+}
+
+// The last map drawn and what it showed. The pane redraws on every scroll; handing
+// the surface the same source keeps the map's frame, so its animations do not restart.
+let lastMap = { key: '', svg: '' }
+
+function officeMap(list: Worker[], chosen: string, width: number, height: number, coreTier: string, allTasks: Task[]) {
+  // Only what the drawing shows: a change in anything else (time running, chat, token
+  // counts) must not redraw it.
+  const key = JSON.stringify([
+    list.map(w => [w.id, w.name, w.status, w.model, w.lastTool, w.task]),
+    allTasks.map(t => [t.owner, t.status]),
+    chosen,
+    width,
+    height,
+    coreTier,
+  ])
+  if (key !== lastMap.key) lastMap = { key, svg: officeSvg(list, chosen, width, height, coreTier, allTasks) }
+  return lastMap.svg
 }
 
 // The approved model and effort for an agent the plan named, if any.
@@ -751,7 +775,6 @@ export const register: Register = on => {
     const chosen = await read($, selected)
     const m = await read($, mode)
     const recent = (await read($, routes)).slice(-6).reverse()
-    const now = await $.clock.now()
     const w = list.find(one => one.id === chosen) ?? list[0]
     const allTasks = await read($, tasks)
     const tasksOf = (id: string) => allTasks.filter(t => t.owner === id)
@@ -816,37 +839,71 @@ export const register: Register = on => {
       }
     }
 
+    const tokens = w?.tokens === undefined ? null : w.tokens >= 1000 ? `${(w.tokens / 1000).toFixed(1)}k tokens` : `${w.tokens} tokens`
+    const mineTasks = w ? tasksOf(w.id) : []
+    // Nothing here changes on its own between redraws (no running clock): a scroll
+    // redraws the pane with an identical tree, so the surface leaves the map alone.
     const detail = w && (
-      <Box key="detail" flexDirection="column" borderStyle="round" paddingX={1}>
-        <Text bold>{w.name}</Text>
-        <Text>
-          {w.status} · {w.kind === 'session' ? 'session' : w.type} · {w.model ?? 'model unknown'}
-        </Text>
-        <Text wrap="wrap">Working on: {w.task}</Text>
-        <Text dimColor>
-          Last tool: {w.lastTool ?? 'none'} · {w.tools} tool calls · running {since(w.startedAt, now)}
-          {w.tokens !== undefined ? ` · ${w.tokens >= 1000 ? `${(w.tokens / 1000).toFixed(1)}k` : w.tokens} tokens` : ''}
-        </Text>
-        {tasksOf(w.id).length > 0 && <Text bold>Tasks {doneOf(tasksOf(w.id))}</Text>}
-        {tasksOf(w.id).map(t => (
-          <Text key={t.id} wrap="wrap" bold={t.status === 'in_progress'} dimColor={t.status === 'completed'}>
-            {MARK[t.status]} {t.subject}
+      <Box key="detail" flexDirection="column" borderStyle="round" borderColor={UI.edge} backgroundColor={UI.panel} paddingX={2} paddingY={1} gap={1}>
+        <Box flexDirection="row" gap={2}>
+          <Text bold color={UI.text}>
+            {w.name}
           </Text>
-        ))}
-        {(w.chat ?? []).map((line, i) => (
-          <Text key={`chat-${i}`} wrap="wrap" dimColor={line.from === 'note'}>
-            {line.from === 'you' ? 'You' : line.from === 'agent' ? w.name : 'Note'}: {line.text}
+          <Text bold color={STATUS_COLOR[w.status]}>
+            {w.status.toUpperCase()}
           </Text>
-        ))}
+          <Text color={UI.muted}>
+            {(w.kind === 'session' ? 'SESSION' : w.type.toUpperCase())} · {modelName(w.model)}
+          </Text>
+        </Box>
+        <Box flexDirection="column">
+          <Text color={UI.muted}>NOW</Text>
+          <Text wrap="wrap" color={UI.text}>
+            {w.task}
+          </Text>
+        </Box>
+        <Text color={UI.muted}>
+          {w.lastTool ?? 'no tool yet'} · {w.tools} tool calls{tokens ? ` · ${tokens}` : ''}
+        </Text>
+        {mineTasks.length > 0 && (
+          <Box flexDirection="column">
+            <Text color={UI.muted}>TASKS {doneOf(mineTasks)}</Text>
+            {mineTasks.map(t => (
+              <Text
+                key={t.id}
+                wrap="wrap"
+                bold={t.status === 'in_progress'}
+                color={t.status === 'in_progress' ? UI.mint : t.status === 'completed' ? UI.muted : UI.text}
+              >
+                {MARK[t.status]} {t.subject}
+              </Text>
+            ))}
+          </Box>
+        )}
+        {(w.chat ?? []).length > 0 && (
+          <Box flexDirection="column">
+            <Text color={UI.muted}>CONVERSATION</Text>
+            {(w.chat ?? []).map((line, i) => (
+              <Text key={`chat-${i}`} wrap="wrap" color={line.from === 'agent' ? UI.mint : line.from === 'note' ? UI.muted : UI.text}>
+                <Text bold color={line.from === 'agent' ? UI.mint : UI.muted}>
+                  {line.from === 'you' ? 'You' : line.from === 'agent' ? w.name : 'Note'}:
+                </Text>{' '}
+                {line.text}
+              </Text>
+            ))}
+          </Box>
+        )}
         {cardDropdowns}
         {talkBox}
       </Box>
     )
 
     const routing = (
-      <Box flexDirection="column">
+      <Box flexDirection="column" borderStyle="round" borderColor={UI.edge} backgroundColor={UI.panel} paddingX={2} paddingY={1} gap={1}>
         <Box flexDirection="row" gap={1}>
-          <Text bold>Routing</Text>
+          <Text bold color={UI.muted}>
+            ROUTING
+          </Text>
           {MODES.map(one => (
             <Button
               key={`mode-${one}`}
@@ -856,10 +913,13 @@ export const register: Register = on => {
             />
           ))}
         </Box>
-        {recent.length === 0 && <Text dimColor>No prompts routed yet.</Text>}
+        {recent.length === 0 && <Text color={UI.muted}>No prompts routed yet.</Text>}
         {recent.map(r => (
-          <Text key={`r-${r.turnId}`} dimColor wrap="truncate-end">
-            {r.tier ?? 'kept'} · effort {r.effort ?? 'unchanged'} · {r.why} · {r.prompt}
+          <Text key={`r-${r.turnId}`} wrap="truncate-end" color={UI.muted}>
+            <Text bold color={r.tier ? TIER_UI[r.tier] : UI.muted}>
+              {(r.tier ?? 'kept').toUpperCase()}
+            </Text>
+            {' '}· effort {r.effort ?? 'unchanged'} · {r.why} · {r.prompt}
           </Text>
         ))}
       </Box>
@@ -875,7 +935,7 @@ export const register: Register = on => {
         <Box flexDirection="column" gap={1}>
           <Svg
             key="map"
-            source={officeSvg(list, w?.id ?? MAIN, width, height, (await read($, current))?.tier ?? m, allTasks)}
+            source={officeMap(list, w?.id ?? MAIN, width, height, (await read($, current))?.tier ?? m, allTasks)}
             width={width}
             height={height}
             alt={`Office with ${list.length} workers`}

@@ -24,7 +24,7 @@ function world(on: any, classify: (text: string) => string | undefined) {
     agents: [] as { id: string; description: string; type: string; status: string }[],
     asked: 0,
   }
-  mock.clock(on, { now: 1_000 })
+  const clock = mock.clock(on, { now: 1_000 })
   on('command.register', async () => ({ value: undefined }))
   on('tool.register', async () => ({ value: undefined }))
   on('session.model', async () => ({ value: SESSION_MODEL }))
@@ -65,7 +65,7 @@ function world(on: any, classify: (text: string) => string | undefined) {
     seen.efforts.push(e.effort)
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null }
   })
-  return seen
+  return Object.assign(seen, { clock })
 }
 
 // The person types a prompt in the box.
@@ -267,7 +267,7 @@ test('tasks the model sets show in its card, on the roster and on the map', asyn
     const pane = (await $.ui.mount({ ...PANE, surface } as never)) as Mount
     await pane.press({ key: 'w-main' })
     expect((await pane.find({ key: 'w-main' }))?.text).toContain('1/3')
-    expect(await pane.find({ type: 'Text', text: /^Tasks 1\/3$/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /^TASKS 1\/3$/ })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: /◐ Move tasks into the office/ })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: /✓ Plan the merge/ })).toBeDefined()
     if (surface === 'desktop') expect(JSON.stringify(await pane.find({ type: 'Svg' }))).toContain('1/3')
@@ -277,7 +277,7 @@ test('tasks the model sets show in its card, on the roster and on the map', asyn
   // A new list replaces the old one; a bad one is refused.
   await $.tool.call({ tool: 'mcp__office-router__set_tasks', tasks: [{ subject: 'Push one mod', status: 'completed' }] } as never)
   const pane = (await $.ui.mount({ ...PANE, surface: 'terminal' } as never)) as Mount
-  expect(await pane.find({ type: 'Text', text: /^Tasks 1\/1$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^TASKS 1\/1$/ })).toBeDefined()
   await pane.unmount()
   const bad = await $.tool.call({ tool: 'mcp__office-router__set_tasks', tasks: [{ subject: 'x', status: 'done' }] } as never)
   expect(JSON.stringify(bad.result)).toContain('"isError":true')
@@ -486,4 +486,44 @@ test("a worker's card shows the tokens its turns used", async ($, on) => {
   expect(await pane.find({ type: 'Text', text: /2\.0k tokens/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /Main session: All done here/ }), 'the reply joins the chat').toBeDefined()
   await pane.unmount()
+})
+
+test('redrawing the office with nothing changed hands back the same map', async ($, on) => {
+  world(on, () => 'simple')
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false } }) as never)
+  await $.session.start(START)
+  await spawn($, 'Explore auth')
+  // The first drawing walks the new agent in; a redraw (a scroll) must not drop that.
+  const first = (await $.ui.mount({ ...PANE, surface: 'desktop' } as never)) as Mount
+  const before = JSON.stringify(await first.find({ type: 'Svg' }))
+  await first.unmount()
+  const again = (await $.ui.mount({ ...PANE, props: { bodyColumns: 100, scroll: { top: 40 } } , surface: 'desktop' } as never)) as Mount
+  expect(JSON.stringify(await again.find({ type: 'Svg' }))).toBe(before)
+  await again.unmount()
+
+  // A change the map shows draws a new one.
+  await $.tool.call({ tool: 'Bash', input: { command: 'ls' }, tool_use_id: 'u1' } as never)
+  const changed = (await $.ui.mount({ ...PANE, surface: 'desktop' } as never)) as Mount
+  expect(JSON.stringify(await changed.find({ type: 'Svg' }))).not.toBe(before)
+  await changed.unmount()
+})
+
+test('a scroll a minute later redraws the whole office pane identically', async ($, on) => {
+  const seen = world(on, () => 'simple')
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false } }) as never)
+  await $.session.start(START)
+  await type($, 'list my files')
+  await pick($, 'effort-low')
+  await $.turn.start({ text: 'list my files', turnId: 'z1' })
+  await $.tool.call({ tool: 'Bash', input: { command: 'ls' }, tool_use_id: 'u1' } as never)
+
+  const first = (await $.ui.mount({ ...PANE, surface: 'desktop' } as never)) as Mount
+  // Handler handles are the engine's own, minted per drawing; everything drawn must match.
+  const drawn = async (m: Mount) => JSON.stringify(await m.drawn()).replace(/"handle":\d+/g, '"handle":0')
+  const before = await drawn(first)
+  await first.unmount()
+  await seen.clock.advance(60_000)
+  const again = (await $.ui.mount({ ...PANE, props: { bodyColumns: 100, scroll: { top: 120 } }, surface: 'desktop' } as never)) as Mount
+  expect(await drawn(again)).toBe(before)
+  await again.unmount()
 })

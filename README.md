@@ -85,7 +85,7 @@ Routing starts in `auto` in every new session. `/route off` lasts only for the s
 - Tasks the model set before the mod loaded do not appear, `/clear` keeps the old tasks, and the model records tasks only when the tool's description persuades it to (work of 3 or more steps).
 - The office shows this session and its subagents only, so you can talk only to this session's agents. Other sessions are not visible to a mod yet.
 - The mobile app draws no text field yet, so there you can read a worker's conversation but not reply.
-- The desktop redraws the office whenever something changes, so the ambient animations restart on each change. A walk that is cut short by a change shows the worker at its destination.
+- The office redraws only when something it shows changes (a worker's status, model, tool or task, a task's progress, the selected worker). Scrolling the pane hands the desktop an identical drawing, so the map keeps playing. When something does change, the ambient animations restart, and a walk cut short shows the worker at its destination.
 - The mod forgets where workers stood when it reloads, so the next drawing walks everyone in from the door again.
 
 ## Develop

@@ -16,6 +16,30 @@ export type Route = {
   at: number
 }
 
+// What the person picked for one subagent in its card; null keeps what it was started with.
+export type AgentPick = { model: Tier | null; effort: Effort | null }
+
+// One task of a plan the model proposed for a big request.
+export type PlanTask = {
+  n: number
+  title: string
+  instructions: string
+  why: string
+  model: Tier
+  effort: Effort
+  // Task numbers that must finish first.
+  after: number[]
+  // False once the person drops it from the plan.
+  keep: boolean
+}
+
+export type Plan = {
+  id: string
+  summary: string
+  status: 'proposed' | 'approved' | 'cancelled'
+  tasks: PlanTask[]
+}
+
 // A typed prompt held until the person picks its effort.
 export type Pending = {
   text: string
@@ -49,6 +73,8 @@ export type Worker = {
   tools: number
   // Absent on workers recorded before the chat existed.
   chat?: ChatLine[]
+  // Tokens its turns used (input, output and cache); absent until a turn ends.
+  tokens?: number
   startedAt: number
   updatedAt: number
 }
@@ -63,6 +89,11 @@ declare module 'claude-code' {
       workers: Worker[]
       selected: string
       tasks: Task[]
+      // The main session's effort once the person picked it: null asks again,
+      // 'session' keeps the session's own.
+      mainEffort: Effort | 'session' | null
+      agentPicks: Record<string, AgentPick>
+      plan: Plan | null
     }
   }
 }

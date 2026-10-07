@@ -1,5 +1,9 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+// A mounted drawing; its acts (select, input) depend on the surface the test names.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Mount = any
+
 const SESSION_MODEL = 'claude-opus-5-5'
 const SESSION_EFFORT = 'high'
 const START = { source: 'startup', cwd: '/tmp', surface: 'desktop', isInteractive: true } as never
@@ -16,6 +20,8 @@ function world(on: any, classify: (text: string) => string | undefined) {
     entered: [] as string[],
     filled: [] as string[],
     sends: [] as { to: unknown; text: string }[],
+    spawned: [] as { description: string; model?: string }[],
+    agents: [] as { id: string; description: string; type: string; status: string }[],
     asked: 0,
   }
   mock.clock(on, { now: 1_000 })
@@ -40,7 +46,12 @@ function world(on: any, classify: (text: string) => string | undefined) {
     seen.sends.push({ to: e.to, text: e.text })
     return { isDelivered: true }
   })
-  on('agent.spawn', async (_$: unknown, e: { description: string }) => ({ model: 'claude-haiku-4-5-20251001', agentId: `agent-${e.description}` }))
+  on('agent.spawn', async (_$: unknown, e: { description: string; model?: string }) => {
+    seen.spawned.push({ description: e.description, model: e.model })
+    return { model: e.model ?? 'claude-haiku-4-5-20251001', agentId: `agent-${e.description}` }
+  })
+  on('agent.list', async () => ({ value: seen.agents }))
+  on('turn.complete', async (_$: unknown, e: { answer?: string }) => ({ text: e.answer ?? '' }))
   on('prompt.fill', async (_$: unknown, e: { text: string }) => {
     seen.filled.push(e.text)
     return { value: undefined }
@@ -78,7 +89,7 @@ async function run($: any, text: string, turnId: string, agentId?: string) {
 
 // The person clicks a button in the effort picker.
 async function pick($: any, key: string) {
-  const picker = await $.ui.mount({ ...PICKER, surface: 'desktop' })
+  const picker = (await $.ui.mount({ ...PICKER, surface: 'desktop' })) as Mount
   await picker.press({ key })
   await picker.unmount()
 }
@@ -100,7 +111,7 @@ test('a typed prompt is held until the person picks an effort', async ($, on) =>
 test('the picker recommends an effort from the model, and the person can overrule it', async ($, on) => {
   const seen = world(on, () => 'simple')
   await type($, 'rename this variable')
-  const picker = await $.ui.mount({ ...PICKER, surface: 'desktop' } as never)
+  const picker = (await $.ui.mount({ ...PICKER, surface: 'desktop' } as never)) as Mount
   expect(await picker.find({ type: 'Text', text: /Recommended effort: low/ })).toBeDefined()
   await picker.press({ key: 'effort-high' })
   await picker.unmount()
@@ -170,7 +181,7 @@ test('the footer button and the office pane draw on terminal and desktop', async
   world(on, () => 'simple')
   await $.session.start(START)
   for (const surface of ['terminal', 'desktop'] as const) {
-    const footer = await $.ui.mount({ ...MODE, surface } as never)
+    const footer = (await $.ui.mount({ ...MODE, surface } as never)) as Mount
     expect(await footer.find({ key: 'open-office' })).toBeDefined()
     expect(await footer.find({ type: 'Text', text: /^engine$/ }), 'keeps what is beneath').toBeDefined()
     await footer.unmount()
@@ -185,7 +196,7 @@ test('the footer button and the office pane draw on terminal and desktop', async
     expect(await strip.find({ type: 'Text', text: /^engine$/ }), 'keeps what is beneath').toBeDefined()
     await strip.unmount()
 
-    const pane = await $.ui.mount({ ...PANE, surface } as never)
+    const pane = (await $.ui.mount({ ...PANE, surface } as never)) as Mount
     expect(await pane.find({ key: 'mode-auto' })).toBeDefined()
     expect(await pane.find({ key: 'w-main' })).toBeDefined()
     await pane.unmount()
@@ -198,7 +209,7 @@ test('pressing a worker shows its task, and the map draws on desktop', async ($,
   await type($, 'Fix the checkout bug')
   await pick($, 'effort-medium')
   await $.turn.start({ text: 'Fix the checkout bug', turnId: 't9' })
-  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
+  const pane = (await $.ui.mount({ ...PANE, surface: 'desktop' } as never)) as Mount
   await pane.press({ key: 'w-main' })
   expect(await pane.find({ type: 'Text', text: /Fix the checkout bug/ }), 'task text').toBeDefined()
   expect(await pane.find({ type: 'Svg' }), 'map').toBeDefined()
@@ -217,7 +228,7 @@ test('a message typed in a subagent card goes to that agent', async ($, on) => {
     parentModel: SESSION_MODEL,
     provider: { plugin: 'engine', tier: 'core' },
   } as never)
-  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
+  const pane = (await $.ui.mount({ ...PANE, surface: 'desktop' } as never)) as Mount
   await pane.press({ key: 'w-agent-auth' })
   await pane.input({ key: 'talk-agent-auth', text: 'Now check the session code too' })
   expect(seen.sends).toEqual([{ to: expect.anything(), text: 'Now check the session code too' }])
@@ -229,7 +240,7 @@ test('a message typed in a subagent card goes to that agent', async ($, on) => {
 test('a message typed in the main session card is routed and waits for an effort click', async ($, on) => {
   const seen = world(on, () => 'complex')
   await $.session.start(START)
-  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
+  const pane = (await $.ui.mount({ ...PANE, surface: 'desktop' } as never)) as Mount
   await pane.input({ key: 'talk-main', text: 'Continue the refactor' })
   await pane.unmount()
   expect(seen.entered).toEqual([])
@@ -253,7 +264,7 @@ test('tasks the model sets show in its card, on the roster and on the map', asyn
   expect(JSON.stringify(ran.result)).toContain('1/3 of your tasks done')
 
   for (const surface of ['terminal', 'desktop'] as const) {
-    const pane = await $.ui.mount({ ...PANE, surface } as never)
+    const pane = (await $.ui.mount({ ...PANE, surface } as never)) as Mount
     await pane.press({ key: 'w-main' })
     expect((await pane.find({ key: 'w-main' }))?.text).toContain('1/3')
     expect(await pane.find({ type: 'Text', text: /^Tasks 1\/3$/ })).toBeDefined()
@@ -265,7 +276,7 @@ test('tasks the model sets show in its card, on the roster and on the map', asyn
 
   // A new list replaces the old one; a bad one is refused.
   await $.tool.call({ tool: 'mcp__office-router__set_tasks', tasks: [{ subject: 'Push one mod', status: 'completed' }] } as never)
-  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+  const pane = (await $.ui.mount({ ...PANE, surface: 'terminal' } as never)) as Mount
   expect(await pane.find({ type: 'Text', text: /^Tasks 1\/1$/ })).toBeDefined()
   await pane.unmount()
   const bad = await $.tool.call({ tool: 'mcp__office-router__set_tasks', tasks: [{ subject: 'x', status: 'done' }] } as never)
@@ -273,7 +284,7 @@ test('tasks the model sets show in its card, on the roster and on the map', asyn
 
   // The built-in todo tool, where a session has it, lands in the same list.
   await $.tool.call({ tool: 'TodoWrite', todos: [{ content: 'Write docs', status: 'pending', activeForm: 'Writing docs' }] } as never)
-  const again = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+  const again = (await $.ui.mount({ ...PANE, surface: 'terminal' } as never)) as Mount
   expect(await again.find({ type: 'Text', text: /○ Write docs/ })).toBeDefined()
   await again.unmount()
 })
@@ -292,4 +303,187 @@ test('the strip shows the main session task progress and what it is doing now', 
   } as never)
   expect(await strip.find({ type: 'Text', text: /tasks 1\/2 · now: Build the board/ })).toBeDefined()
   await strip.unmount()
+})
+
+const STRIP = {
+  plugin: 'office-router',
+  component: 'AbovePrompt',
+  props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100 },
+  surface: 'desktop',
+} as const
+
+test('a follow-up keeps the first effort and model, with no dialog', async ($, on) => {
+  const seen = world(on, () => 'complex')
+  await type($, 'Redesign the auth flow')
+  await pick($, 'effort-high')
+  await run($, 'Redesign the auth flow', 'f1')
+
+  // The follow-up enters at once: no dialog, no new routing.
+  const result = await type($, 'Now add tests for it')
+  expect(result).toEqual({ text: 'Now add tests for it' })
+  await run($, 'Now add tests for it', 'f2')
+  expect(seen.sent).toEqual(['claude-opus-5-5', 'claude-opus-5-5'])
+  expect(seen.efforts).toEqual(['high', 'high'])
+  expect(seen.asked).toBe(1)
+})
+
+test('the dropdowns change the model and effort for the next prompt', async ($, on) => {
+  const seen = world(on, () => 'complex')
+  await type($, 'First task')
+  await pick($, 'effort-high')
+  await run($, 'First task', 'd1')
+
+  const strip = (await $.ui.mount(STRIP as never)) as Mount
+  await strip.select({ key: 'strip-model', value: 'haiku' })
+  await strip.select({ key: 'strip-effort', value: 'low' })
+  await strip.unmount()
+
+  expect(await type($, 'Quick rename')).toEqual({ text: 'Quick rename' })
+  await run($, 'Quick rename', 'd2')
+  expect(seen.sent.at(-1)).toBe('claude-haiku-4-5-20251001')
+  expect(seen.efforts.at(-1)).toBe('low')
+
+  // "ask me" brings the dialog back for the next prompt.
+  const again = (await $.ui.mount(STRIP as never)) as Mount
+  await again.select({ key: 'strip-effort', value: 'ask' })
+  await again.unmount()
+  expect(await type($, 'Another one')).toHaveProperty('drop')
+})
+
+test('auto-route re-routes each follow-up while keeping the chosen effort', async ($, on) => {
+  const seen = world(on, text => (text.includes('rename') ? 'simple' : 'complex'))
+  await type($, 'Big redesign')
+  await pick($, 'effort-medium')
+  await run($, 'Big redesign', 'a1')
+
+  const strip = (await $.ui.mount(STRIP as never)) as Mount
+  await strip.select({ key: 'strip-model', value: 'auto' })
+  await strip.unmount()
+
+  expect(await type($, 'rename a variable')).toEqual({ text: 'rename a variable' })
+  await run($, 'rename a variable', 'a2')
+  expect(seen.sent).toEqual(['claude-opus-5-5', 'claude-haiku-4-5-20251001'])
+  expect(seen.efforts).toEqual(['medium', 'medium'])
+})
+
+test("an agent's card picks the model and effort its next steps use", async ($, on) => {
+  const seen = world(on, () => 'simple')
+  await $.session.start(START)
+  await $.agent.spawn({
+    prompt: 'Map the auth code',
+    description: 'auth',
+    subagentType: 'Explore',
+    background: true,
+    fork: false,
+    parentModel: SESSION_MODEL,
+    provider: { plugin: 'engine', tier: 'core' },
+  } as never)
+  const pane = (await $.ui.mount({ ...PANE, surface: 'desktop' } as never)) as Mount
+  await pane.press({ key: 'w-agent-auth' })
+  await pane.select({ key: 'agent-model-agent-auth', value: 'sonnet' })
+  await pane.select({ key: 'agent-effort-agent-auth', value: 'max' })
+  await pane.unmount()
+
+  await run($, 'unused', 's1', 'agent-auth')
+  expect(seen.sent).toEqual(['claude-sonnet-5-5'])
+  expect(seen.efforts).toEqual(['max'])
+})
+
+const PLAN = { plugin: 'office-router', component: 'Pane', requestId: 'plan', props: { bodyColumns: 100 } } as const
+const PROPOSAL = {
+  summary: 'Add a billing page',
+  tasks: [
+    { title: 'Read the billing API', instructions: 'List the endpoints', model: 'haiku', effort: 'low', why: 'Lookup only' },
+    { title: 'Build the page', instructions: 'Build it', model: 'opus', effort: 'high', why: 'New UI', after: [1] },
+    { title: 'Write tests', instructions: 'Test it', model: 'sonnet', effort: 'medium', after: [2] },
+  ],
+}
+const spawn = ($: any, description: string) =>
+  $.agent.spawn({ prompt: 'go', description, subagentType: 'general-purpose', background: true, fork: false, parentModel: SESSION_MODEL, provider: { plugin: 'engine', tier: 'core' } })
+
+test('a proposed plan waits for approval, and the approved models and efforts are applied', async ($, on) => {
+  const seen = world(on, () => 'simple')
+  const ran = await $.tool.call({ tool: 'mcp__office-router__propose_plan', ...PROPOSAL } as never)
+  expect(JSON.stringify(ran.result)).toContain('wait')
+  expect(seen.entered).toEqual([])
+
+  // The person moves "Build the page" from Opus to Sonnet, then approves.
+  const pane = (await $.ui.mount({ ...PLAN, surface: 'desktop' } as never)) as Mount
+  expect(await pane.find({ type: 'Text', text: /Why haiku: Lookup only/ })).toBeDefined()
+  await pane.select({ key: 'plan-model-2', value: 'sonnet' })
+  await pane.press({ key: 'plan-approve' })
+  await pane.unmount()
+
+  const message = seen.entered.at(-1) ?? ''
+  expect(message).toContain('plan:1 Read the billing API')
+  expect(message).toContain('plan:2 Build the page\n  after: plan:1')
+  expect(message).toContain('plan:3 Write tests\n  after: plan:2')
+
+  // The main session starts the agents by those names: each gets its approved model and effort.
+  await spawn($, 'plan:1 Read the billing API')
+  await spawn($, 'plan:2 Build the page')
+  await spawn($, 'Some other agent')
+  expect(seen.spawned.map(s => s.model)).toEqual(['claude-haiku-4-5-20251001', 'claude-sonnet-5-5', undefined])
+  await run($, 'unused', 'p1', 'agent-plan:1 Read the billing API')
+  await run($, 'unused', 'p2', 'agent-plan:2 Build the page')
+  expect(seen.efforts).toEqual(['low', 'high'])
+})
+
+test('dropping tasks and running as one agent uses the largest kept model and effort', async ($, on) => {
+  const seen = world(on, () => 'simple')
+  await $.tool.call({ tool: 'mcp__office-router__propose_plan', ...PROPOSAL } as never)
+  const pane = (await $.ui.mount({ ...PLAN, surface: 'terminal' } as never)) as Mount
+  await pane.press({ key: 'plan-keep-2' })
+  expect(await pane.find({ type: 'Text', text: /dropped/ })).toBeDefined()
+  await pane.press({ key: 'plan-one' })
+  await pane.unmount()
+  expect(seen.entered.at(-1)).toContain('plan:all Add a billing page')
+  expect(seen.entered.at(-1)).not.toContain('Build the page')
+  await spawn($, 'plan:all Add a billing page')
+  expect(seen.spawned.at(-1)?.model).toBe('claude-sonnet-5-5')
+})
+
+test('a cancelled plan starts nothing and names no models', async ($, on) => {
+  const seen = world(on, () => 'simple')
+  await $.tool.call({ tool: 'mcp__office-router__propose_plan', ...PROPOSAL } as never)
+  const pane = (await $.ui.mount({ ...PLAN, surface: 'desktop' } as never)) as Mount
+  await pane.press({ key: 'plan-cancel' })
+  await pane.unmount()
+  expect(seen.entered.at(-1)).toContain('Do not start the work')
+  await spawn($, 'plan:1 Read the billing API')
+  expect(seen.spawned.at(-1)?.model).toBeUndefined()
+
+  const bad = await $.tool.call({ tool: 'mcp__office-router__propose_plan', summary: 'x', tasks: [{ title: 'y' }] } as never)
+  expect(JSON.stringify(bad.result)).toContain('"isError":true')
+})
+
+test("a plan agent's first request gets its effort even before its spawn returns", async ($, on) => {
+  const seen = world(on, () => 'simple')
+  await $.tool.call({ tool: 'mcp__office-router__propose_plan', ...PROPOSAL } as never)
+  const pane = (await $.ui.mount({ ...PLAN, surface: 'desktop' } as never)) as Mount
+  await pane.press({ key: 'plan-approve' })
+  await pane.unmount()
+  // No spawn seen yet: the engine already lists the agent by its plan name.
+  seen.agents.push({ id: 'early', description: 'plan:3 Write tests', type: 'general-purpose', status: 'running' })
+  await run($, 'unused', 'e1', 'early')
+  expect(seen.sent).toEqual(['claude-sonnet-5-5'])
+  expect(seen.efforts).toEqual(['medium'])
+})
+
+test("a worker's card shows the tokens its turns used", async ($, on) => {
+  world(on, () => 'simple')
+  await $.session.start(START)
+  await $.turn.complete({
+    turnId: 't1',
+    reason: 'answer',
+    answer: 'All done here',
+    durationMs: 1000,
+    isAborted: false,
+    usage: { model: SESSION_MODEL, input_tokens: 1200, output_tokens: 300, cache_creation_input_tokens: 0, cache_read_input_tokens: 500 },
+  } as never)
+  const pane = (await $.ui.mount({ ...PANE, surface: 'terminal' } as never)) as Mount
+  await pane.press({ key: 'w-main' })
+  expect(await pane.find({ type: 'Text', text: /2\.0k tokens/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /Main session: All done here/ }), 'the reply joins the chat').toBeDefined()
+  await pane.unmount()
 })

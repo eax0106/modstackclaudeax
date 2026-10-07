@@ -1,0 +1,192 @@
+import { expect, mock, test } from 'claude-code/testing'
+
+const SESSION_MODEL = 'claude-opus-5-5'
+const SESSION_EFFORT = 'high'
+const START = { source: 'startup', cwd: '/tmp', surface: 'desktop', isInteractive: true } as never
+const PANE = { plugin: 'office-router', component: 'Pane', requestId: 'office', props: { bodyColumns: 100 } } as const
+const PICKER = { plugin: 'office-router', component: 'Pane', requestId: 'effort', props: { bodyColumns: 100 } } as const
+const MODE = { plugin: 'office-router', component: 'SessionMode', props: { modes: ['auto'] } } as const
+
+// The engine beneath the plugin: just enough of it for these hooks.
+// `classify` answers $.model.classify. `seen` records what reached the engine.
+function world(on: any, classify: (text: string) => string | undefined) {
+  const seen = {
+    sent: [] as string[],
+    efforts: [] as unknown[],
+    entered: [] as string[],
+    filled: [] as string[],
+    asked: 0,
+  }
+  mock.clock(on, { now: 1_000 })
+  on('command.register', async () => ({ value: undefined }))
+  on('session.model', async () => ({ value: SESSION_MODEL }))
+  on('ui.status', async () => ({ value: undefined }))
+  on('ui.open', async () => ({ value: { isPlaced: true } }))
+  on('ui.close', async () => ({ value: undefined }))
+  on('session.start', async (_$: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+  on('turn.start', async (_$: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
+  on('prompt.submit', async (_$: unknown, e: { text: string }) => {
+    seen.entered.push(e.text)
+    return { text: e.text }
+  })
+  on('prompt.fill', async (_$: unknown, e: { text: string }) => {
+    seen.filled.push(e.text)
+    return { value: undefined }
+  })
+  on('model.classify', async (_$: unknown, e: { text: string }) => {
+    seen.asked += 1
+    return { value: classify(e.text) }
+  })
+  on('turn.step', async function* (_$: unknown, e: { turnId: string; index: number; model: string; effort?: unknown }) {
+    seen.sent.push(e.model)
+    seen.efforts.push(e.effort)
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null }
+  })
+  return seen
+}
+
+// The person types a prompt in the box.
+const type = ($: any, text: string) => $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
+
+// The engine runs the turn the released prompt starts.
+async function run($: any, text: string, turnId: string, agentId?: string) {
+  await $.turn.start({ text, turnId })
+  const stream = $.turn.step({
+    turnId,
+    index: 0,
+    model: SESSION_MODEL,
+    effort: SESSION_EFFORT,
+    messageCount: 1,
+    ...(agentId ? { agentId } : {}),
+  })
+  for await (const _ of stream) {
+    // drain the response
+  }
+}
+
+// The person clicks a button in the effort picker.
+async function pick($: any, key: string) {
+  const picker = await $.ui.mount({ ...PICKER, surface: 'desktop' })
+  await picker.press({ key })
+  await picker.unmount()
+}
+
+test('a typed prompt is held until the person picks an effort', async ($, on) => {
+  const seen = world(on, () => 'complex')
+  const held = await type($, 'Redesign the auth architecture')
+  expect(held).toHaveProperty('drop')
+  expect(seen.entered).toEqual([])
+
+  await pick($, 'effort-max')
+  expect(seen.entered).toEqual(['Redesign the auth architecture'])
+
+  await run($, 'Redesign the auth architecture', 't1')
+  expect(seen.sent).toEqual(['claude-opus-5-5'])
+  expect(seen.efforts).toEqual(['max'])
+})
+
+test('the picker recommends an effort from the model, and the person can overrule it', async ($, on) => {
+  const seen = world(on, () => 'simple')
+  await type($, 'rename this variable')
+  const picker = await $.ui.mount({ ...PICKER, surface: 'desktop' } as never)
+  expect(await picker.find({ type: 'Text', text: /Recommended effort: low/ })).toBeDefined()
+  await picker.press({ key: 'effort-high' })
+  await picker.unmount()
+
+  await run($, 'rename this variable', 't2')
+  expect(seen.sent).toEqual(['claude-haiku-4-5-20251001'])
+  expect(seen.efforts).toEqual(['high'])
+})
+
+test('keep current leaves the session effort as it was', async ($, on) => {
+  const seen = world(on, () => 'moderate')
+  await type($, 'fix the failing login test')
+  await pick($, 'effort-keep')
+  await run($, 'fix the failing login test', 't3')
+  expect(seen.sent).toEqual(['claude-sonnet-5-5'])
+  expect(seen.efforts).toEqual([SESSION_EFFORT])
+})
+
+test('the router never sets effort without a click', async ($, on) => {
+  const seen = world(on, () => 'complex')
+  await type($, 'Redesign everything')
+  // No click: a turn with the same text arrives from elsewhere.
+  await run($, 'Redesign everything', 't4')
+  expect(seen.sent).toEqual([SESSION_MODEL])
+  expect(seen.efforts).toEqual([SESSION_EFFORT])
+})
+
+test('an unsure classifier keeps the session model but still asks for effort', async ($, on) => {
+  const seen = world(on, () => undefined)
+  await type($, 'something odd')
+  await pick($, 'effort-medium')
+  await run($, 'something odd', 't5')
+  expect(seen.sent).toEqual([SESSION_MODEL])
+  expect(seen.efforts).toEqual(['medium'])
+})
+
+test('a subagent request is never rerouted', async ($, on) => {
+  const seen = world(on, () => 'simple')
+  await type($, 'rename x')
+  await pick($, 'effort-low')
+  await run($, 'rename x', 't6', 'agent-1')
+  expect(seen.sent).toEqual([SESSION_MODEL])
+  expect(seen.efforts).toEqual([SESSION_EFFORT])
+})
+
+test('/route sonnet pins the model and skips the classifier', async ($, on) => {
+  const seen = world(on, () => 'complex')
+  await $.command.run({ command: 'route', args: 'sonnet' } as never)
+  await type($, 'Redesign everything')
+  await pick($, 'effort-keep')
+  await run($, 'Redesign everything', 't7')
+  expect(seen.sent).toEqual(['claude-sonnet-5-5'])
+  expect(seen.asked).toBe(0)
+})
+
+test('/route off sends prompts straight through with no picker', async ($, on) => {
+  const seen = world(on, () => 'simple')
+  await $.command.run({ command: 'route', args: 'off' } as never)
+  const result = await type($, 'rename x')
+  expect(result).toEqual({ text: 'rename x' })
+  await run($, 'rename x', 't8')
+  expect(seen.sent).toEqual([SESSION_MODEL])
+  expect(seen.efforts).toEqual([SESSION_EFFORT])
+})
+
+test('the footer button and the office pane draw on terminal and desktop', async ($, on) => {
+  world(on, () => 'simple')
+  await $.session.start(START)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const footer = await $.ui.mount({ ...MODE, surface } as never)
+    expect(await footer.find({ key: 'open-office' })).toBeDefined()
+    await footer.unmount()
+
+    const strip = await $.ui.mount({
+      plugin: 'office-router',
+      component: 'AbovePrompt',
+      props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100 },
+      surface,
+    } as never)
+    expect(await strip.find({ key: 'open-office-band' })).toBeDefined()
+    await strip.unmount()
+
+    const pane = await $.ui.mount({ ...PANE, surface } as never)
+    expect(await pane.find({ key: 'mode-auto' })).toBeDefined()
+    expect(await pane.find({ key: 'w-main' })).toBeDefined()
+    await pane.unmount()
+  }
+})
+
+test('pressing a worker shows its task, and the map draws on desktop', async ($, on) => {
+  world(on, () => 'moderate')
+  await $.session.start(START)
+  await type($, 'Fix the checkout bug')
+  await pick($, 'effort-medium')
+  await $.turn.start({ text: 'Fix the checkout bug', turnId: 't9' })
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
+  await pane.press({ key: 'w-main' })
+  expect(await pane.find({ type: 'Text', text: /Fix the checkout bug/ }), 'task text').toBeDefined()
+  expect(await pane.find({ type: 'Svg' }), 'map').toBeDefined()
+  await pane.unmount()
+})

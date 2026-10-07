@@ -1,0 +1,6 @@
+{
+  "name": "office-router",
+  "version": "0.1.0",
+  "description": "Routes each prompt to Haiku, Sonnet or Opus by difficulty, and shows the session and its agents as workers in an office pane.",
+  "types": "./types/index.d.ts"
+}

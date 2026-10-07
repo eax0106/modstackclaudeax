@@ -30,6 +30,9 @@ export type Pending = {
 
 export type WorkerStatus = 'working' | 'idle' | 'done' | 'error'
 
+// One line of the conversation shown in a worker's card.
+export type ChatLine = { from: 'you' | 'agent' | 'note'; text: string; at: number }
+
 export type Worker = {
   id: string
   name: string
@@ -40,6 +43,8 @@ export type Worker = {
   model: string | null
   lastTool: string | null
   tools: number
+  // Absent on workers recorded before the chat existed.
+  chat?: ChatLine[]
   startedAt: number
   updatedAt: number
 }

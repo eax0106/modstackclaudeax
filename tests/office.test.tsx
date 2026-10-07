@@ -15,6 +15,7 @@ function world(on: any, classify: (text: string) => string | undefined) {
     efforts: [] as unknown[],
     entered: [] as string[],
     filled: [] as string[],
+    sends: [] as { to: unknown; text: string }[],
     asked: 0,
   }
   mock.clock(on, { now: 1_000 })
@@ -29,6 +30,11 @@ function world(on: any, classify: (text: string) => string | undefined) {
     seen.entered.push(e.text)
     return { text: e.text }
   })
+  on('session.send', async (_$: unknown, e: { to: unknown; text: string }) => {
+    seen.sends.push({ to: e.to, text: e.text })
+    return { isDelivered: true }
+  })
+  on('agent.spawn', async (_$: unknown, e: { description: string }) => ({ model: 'claude-haiku-4-5-20251001', agentId: `agent-${e.description}` }))
   on('prompt.fill', async (_$: unknown, e: { text: string }) => {
     seen.filled.push(e.text)
     return { value: undefined }
@@ -189,4 +195,39 @@ test('pressing a worker shows its task, and the map draws on desktop', async ($,
   expect(await pane.find({ type: 'Text', text: /Fix the checkout bug/ }), 'task text').toBeDefined()
   expect(await pane.find({ type: 'Svg' }), 'map').toBeDefined()
   await pane.unmount()
+})
+
+test('a message typed in a subagent card goes to that agent', async ($, on) => {
+  const seen = world(on, () => 'simple')
+  await $.session.start(START)
+  await $.agent.spawn({
+    prompt: 'Map the auth code',
+    description: 'auth',
+    subagentType: 'Explore',
+    background: true,
+    fork: false,
+    parentModel: SESSION_MODEL,
+    provider: { plugin: 'engine', tier: 'core' },
+  } as never)
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
+  await pane.press({ key: 'w-agent-auth' })
+  await pane.input({ key: 'talk-agent-auth', text: 'Now check the session code too' })
+  expect(seen.sends).toEqual([{ to: expect.anything(), text: 'Now check the session code too' }])
+  expect(JSON.stringify(seen.sends[0]!.to)).toContain('agent-auth')
+  expect(await pane.find({ type: 'Text', text: /You: Now check the session code too/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a message typed in the main session card is routed and waits for an effort click', async ($, on) => {
+  const seen = world(on, () => 'complex')
+  await $.session.start(START)
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' } as never)
+  await pane.input({ key: 'talk-main', text: 'Continue the refactor' })
+  await pane.unmount()
+  expect(seen.entered).toEqual([])
+  await pick($, 'effort-high')
+  expect(seen.entered).toEqual(['Continue the refactor'])
+  await run($, 'Continue the refactor', 'm1')
+  expect(seen.sent).toEqual(['claude-opus-5-5'])
+  expect(seen.efforts).toEqual(['high'])
 })

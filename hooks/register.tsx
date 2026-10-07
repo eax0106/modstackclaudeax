@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import { officeSvg } from './office-map.js'
-import type { Effort, Pending, Route, RouteMode, Tier, Worker, WorkerStatus } from '../types'
+import type { ChatLine, Effort, Pending, Route, RouteMode, Tier, Worker, WorkerStatus } from '../types'
 
 const PLUGIN = 'office-router'
 const PANE = 'office'
@@ -72,6 +72,47 @@ async function choose($: EngineInterface, choice: Effort | 'keep') {
   void $.prompt.submit({ text: held.text, attachments: held.attachments as never, asUser: true })
 }
 
+// Adds a line to a worker's conversation, keeping the last few.
+async function say($: EngineInterface, id: string, from: ChatLine['from'], text: string) {
+  const at = await $.clock.now()
+  const line: ChatLine = { from, text: snippet(text, 600), at }
+  await update($, workers, list => list.map(w => (w.id === id ? { ...w, chat: [...(w.chat ?? []), line].slice(-8) } : w)))
+}
+
+// Holds a prompt for the main session: route it and ask for its effort.
+async function hold($: EngineInterface, text: string, attachments: readonly unknown[]) {
+  const { tier, why } = await classify($, text)
+  const held: Pending = {
+    text,
+    attachments,
+    tier,
+    why,
+    recommended: tier ? RECOMMEND[tier] : 'medium',
+    choice: null,
+    at: await $.clock.now(),
+  }
+  await update($, pending, () => held)
+  await $.ui.open({ id: PICKER, title: 'Choose effort', focus: true, closeOnEscape: true, holdToasts: true })
+  return tier
+}
+
+// A message typed in a worker's card. The main session gets it as a prompt,
+// routed and held for its effort like a typed one; a subagent gets it as a
+// message, which resumes it when it had finished.
+async function talk($: EngineInterface, id: string, value: string) {
+  const text = value.trim()
+  if (!text) return
+  if (id === MAIN) {
+    if ((await read($, mode)) === 'off') await $.prompt.submit({ text, asUser: true })
+    else await hold($, text, [])
+    return
+  }
+  await say($, id, 'you', text)
+  const sent = await $.session.send({ to: { agentId: id }, text })
+  if (sent.isDelivered) await touch($, id, { status: 'working' })
+  else await say($, id, 'note', `Not delivered: ${sent.reason}`)
+}
+
 // ---------------------------------------------------------------- hooks
 
 export const register: Register = on => {
@@ -131,18 +172,7 @@ export const register: Register = on => {
     if (e.origin.kind !== 'composer') return next(e)
     const text = e.text.trim()
     if (!text || text.startsWith('/') || (await read($, mode)) === 'off') return next(e)
-    const { tier, why } = await classify($, e.text)
-    const held: Pending = {
-      text: e.text,
-      attachments: e.attachments ?? [],
-      tier,
-      why,
-      recommended: tier ? RECOMMEND[tier] : 'medium',
-      choice: null,
-      at: await $.clock.now(),
-    }
-    await update($, pending, () => held)
-    await $.ui.open({ id: PICKER, title: 'Choose effort', focus: true, closeOnEscape: true, holdToasts: true })
+    const tier = await hold($, e.text, e.attachments ?? [])
     return { drop: `Routed to ${tier ?? 'your current model'}. Pick an effort level to start.` }
   })
 
@@ -176,6 +206,7 @@ export const register: Register = on => {
       $.ui.status(`route: ${route.tier ?? 'session model'} · effort ${route.effort ?? 'unchanged'}`)
       const model = route.tier ? MODELS[route.tier] : await $.session.model()
       await touch($, MAIN, { status: 'working', task: snippet(e.text, 300), model })
+      await say($, MAIN, 'you', e.text)
     } else {
       await update($, current, () => null)
       await touch($, MAIN, e.text.trim() ? { status: 'working', task: snippet(e.text, 300) } : { status: 'working' })
@@ -210,6 +241,7 @@ export const register: Register = on => {
         model: result.model,
         lastTool: null,
         tools: 0,
+        chat: [{ from: 'you', text: snippet(e.prompt, 600), at: now }],
         startedAt: now,
         updatedAt: now,
       }
@@ -230,6 +262,7 @@ export const register: Register = on => {
     const id = e.agentId ?? MAIN
     const status: WorkerStatus = e.reason === 'error' ? 'error' : id === MAIN ? 'idle' : 'done'
     await touch($, id, { status })
+    if (e.text.trim()) await say($, id, 'agent', e.text)
     return next(e)
   })
 
@@ -323,6 +356,20 @@ export const register: Register = on => {
       </Box>
     )
 
+    // The mobile app draws no text field yet.
+    let talkBox = null
+    if (w && e.surface !== 'mobile') {
+      const { Input } = $.ui.resolve(e)
+      talkBox = (
+        <Input
+          key={`talk-${w.id}`}
+          placeholder={w.id === MAIN ? 'Message the main session (routed, you pick the effort)' : `Message ${w.name} to continue its work`}
+          submitLabel="Send"
+          onSubmit={value => void talk($, w.id, value)}
+        />
+      )
+    }
+
     const detail = w && (
       <Box key="detail" flexDirection="column" borderStyle="round" paddingX={1}>
         <Text bold>{w.name}</Text>
@@ -333,6 +380,12 @@ export const register: Register = on => {
         <Text dimColor>
           Last tool: {w.lastTool ?? 'none'} · {w.tools} tool calls · running {since(w.startedAt, now)}
         </Text>
+        {(w.chat ?? []).map((line, i) => (
+          <Text key={`chat-${i}`} wrap="wrap" dimColor={line.from === 'note'}>
+            {line.from === 'you' ? 'You' : line.from === 'agent' ? w.name : 'Note'}: {line.text}
+          </Text>
+        ))}
+        {talkBox}
       </Box>
     )
 

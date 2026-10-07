@@ -104,34 +104,101 @@ function beam(seat, i, color) {
     <animate attributeName="stroke-dashoffset" values="0;-36" dur="1.4s" repeatCount="indefinite"/></path>${sparks}`
 }
 
+// Walkable lanes: vertical aisles between the desk columns and beside the side
+// rooms, joined by a corridor along the bottom of the floor.
+const AISLES = [140, 252, 372, 520]
+const CORRIDORS = [400]
+const ENTRANCE = { x: 30, y: 400 }
+const SPEED = 95 // drawing units a second
+// Places an idle worker strolls to.
+const SPOTS = [
+  { x: 640, y: 322 }, // the coffee
+  { x: 440, y: 312 }, // in front of the router
+  { x: 440, y: 150 }, // behind the router
+  { x: 604, y: 128 }, // the archive shelf
+  { x: 252, y: 400 }, // the bottom corridor
+  { x: 140, y: 236 }, // the middle aisle
+]
+
+const nearestAisle = p => AISLES.reduce((m, x) => (Math.abs(x - p.x) < Math.abs(m - p.x) ? x : m))
+
+// A walk from a to b along the lanes: out to the nearest aisle, along a corridor
+// when the aisles differ, then in to b.
+function route(a, b) {
+  const ax = nearestAisle(a)
+  const bx = nearestAisle(b)
+  const pts = [a, { x: ax, y: a.y }]
+  if (ax !== bx) {
+    const cost = y => Math.abs(a.y - y) + Math.abs(b.y - y)
+    const cy = CORRIDORS.reduce((m, y) => (cost(y) < cost(m) ? y : m))
+    pts.push({ x: ax, y: cy }, { x: bx, y: cy })
+  }
+  pts.push({ x: bx, y: b.y }, b)
+  return pts.filter((p, i) => i === 0 || p.x !== pts[i - 1].x || p.y !== pts[i - 1].y)
+}
+const lengthOf = pts => pts.slice(1).reduce((n, p, i) => n + Math.hypot(p.x - pts[i].x, p.y - pts[i].y), 0)
+const pathOf = (pts, o = { x: 0, y: 0 }) => 'M' + pts.map(p => `${p.x - o.x},${p.y - o.y}`).join(' L')
+
+// An idle worker's loop: seat, two places, seat, pausing at each.
+function roam(seat, h) {
+  const first = SPOTS[h % SPOTS.length]
+  const second = SPOTS[(h >> 4) % SPOTS.length] === first ? SPOTS[(h + 1) % SPOTS.length] : SPOTS[(h >> 4) % SPOTS.length]
+  const legs = [route(seat, first), route(first, second), route(second, seat)]
+  const lengths = legs.map(lengthOf)
+  const total = lengths.reduce((n, l) => n + l, 0)
+  const pauses = [2.5 + (h % 3), 2 + ((h >> 2) % 3), 4 + ((h >> 5) % 4)]
+  const times = [0]
+  const points = [0]
+  let at = 0
+  let walked = 0
+  lengths.forEach((l, i) => {
+    at += l / SPEED
+    walked += l
+    times.push(at)
+    points.push(walked / total)
+    at += pauses[i]
+    times.push(at)
+    points.push(walked / total)
+  })
+  const all = [legs[0][0], ...legs.flatMap(leg => leg.slice(1))]
+  return {
+    path: pathOf(all, seat),
+    dur: at,
+    keyTimes: times.map(t => (t / at).toFixed(4)).join(';'),
+    keyPoints: points.map(p => Math.min(1, p).toFixed(4)).join(';'),
+  }
+}
+
 function person(seat, isSelected) {
   const { w, x, y } = seat
   const h = hash(w.id)
   const tier = tierOf(w.model)
   const color = tier ? TIER_COLOR[tier] : C.muted
-  const from = lastSeat.get(w.id)
-  const walks = from !== undefined && (from.x !== x || from.y !== y)
-  const dx = walks ? from.x - x : 0
-  const dy = walks ? from.y - y : 0
-  const walkFor = walks ? Math.min(2.6, Math.max(1.1, Math.hypot(dx, dy) / 150)) : 0
+  // A worker seen for the first time walks in from the entrance.
+  const from = lastSeat.get(w.id) ?? ENTRANCE
+  const walks = from.x !== x || from.y !== y
+  let walkFor = 0
+  let place = `<g transform="translate(${x} ${y})">`
+  if (walks) {
+    const pts = route(from, { x, y })
+    walkFor = Math.min(7, Math.max(1.2, lengthOf(pts) / SPEED))
+    place = `<g><animateMotion path="${pathOf(pts)}" dur="${walkFor.toFixed(2)}s" fill="freeze" calcMode="paced"/>`
+  }
   lastSeat.set(w.id, { x, y })
 
-  const enter = walks
-    ? `<animateTransform attributeName="transform" type="translate" from="${dx} ${dy}" to="0 0" dur="${walkFor}s" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines="0.45 0 0.2 1"/>`
-    : ''
   const strides = walks ? Math.max(2, Math.round(walkFor / 0.36)) : 0
   const legSwing = (dir, delay) =>
-    w.status === 'idle'
-      ? `<animateTransform attributeName="transform" type="rotate" values="${-18 * dir} 0 0;${18 * dir} 0 0;${-18 * dir} 0 0" dur="0.9s" begin="${walkFor + delay}s" repeatCount="indefinite"/>`
-      : walks
-        ? `<animateTransform attributeName="transform" type="rotate" values="${-24 * dir} 0 0;${24 * dir} 0 0;${-24 * dir} 0 0" dur="0.36s" repeatCount="${strides}"/>`
-        : ''
+    (walks
+      ? `<animateTransform attributeName="transform" type="rotate" values="${-24 * dir} 0 0;${24 * dir} 0 0;${-24 * dir} 0 0" dur="0.36s" repeatCount="${strides}"/>`
+      : '') +
+    (w.status === 'idle'
+      ? `<animateTransform attributeName="transform" type="rotate" values="${-20 * dir} 0 0;${20 * dir} 0 0;${-20 * dir} 0 0" dur="0.42s" begin="${(walkFor + delay).toFixed(2)}s" repeatCount="indefinite"/>`
+      : '')
 
   let motion = ''
   if (w.status === 'idle') {
-    const a = 10 + (h % 9)
-    const b = 6 + ((h >> 3) % 8)
-    motion = `<animateMotion path="M0,0 C${a},-${b} ${a + 8},${b} ${a},${b + 4} S-${a},${b} -${a - 2},0 S-4,-${b} 0,0" dur="${9 + (h % 5)}s" begin="${walkFor}s" repeatCount="indefinite"/>`
+    const r = roam({ x, y }, h)
+    motion = `<animateMotion path="${r.path}" dur="${r.dur.toFixed(2)}s" begin="${walkFor.toFixed(2)}s" repeatCount="indefinite" calcMode="linear" keyTimes="${r.keyTimes}" keyPoints="${r.keyPoints}"/>`
   } else if (w.status === 'working') {
     motion = `<animateTransform attributeName="transform" type="translate" values="0 0;0 -1.6;0 0" dur="${0.5 + (h % 3) * 0.08}s" begin="${walkFor}s" repeatCount="indefinite"/>`
   } else if (w.status === 'error') {
@@ -149,15 +216,16 @@ function person(seat, isSelected) {
         <animate attributeName="r" values="12;26" dur="1.1s" repeatCount="indefinite"/>
         <animate attributeName="opacity" values="0.9;0" dur="1.1s" repeatCount="indefinite"/></circle>`
       : ''
+  const toolWidth = w.lastTool ? Math.min(96, 24 + short(w.lastTool, 12).length * 5.4) : 0
   const bubble =
     w.status === 'working' && w.lastTool
       ? `<g transform="translate(12 -50)" opacity="0">
-        <animate attributeName="opacity" values="0;1" dur="0.4s" begin="${walkFor + 0.1}s" fill="freeze"/>
-        <rect width="${Math.min(96, 24 + short(w.lastTool, 12).length * 5.4)}" height="16" rx="8" fill="${C.panel}" stroke="${color}" stroke-opacity="0.7"/>
+        <animate attributeName="opacity" values="0;1" dur="0.4s" begin="${(walkFor + 0.1).toFixed(2)}s" fill="freeze"/>
+        <rect width="${toolWidth}" height="16" rx="8" fill="${C.panel}" stroke="${color}" stroke-opacity="0.7"/>
         <text x="8" y="11" font-size="8.5" fill="${C.text}" font-family="${FONT}" font-weight="600">${esc(short(w.lastTool, 12))}</text>
         ${[0, 1, 2]
           .map(
-            k => `<circle cx="${Math.min(96, 24 + short(w.lastTool, 12).length * 5.4) - 14 + k * 4}" cy="8" r="1.2" fill="${color}">
+            k => `<circle cx="${toolWidth - 14 + k * 4}" cy="8" r="1.2" fill="${color}">
           <animate attributeName="opacity" values="0.2;1;0.2" dur="0.9s" begin="${k * 0.15}s" repeatCount="indefinite"/></circle>`,
           )
           .join('')}
@@ -172,14 +240,14 @@ function person(seat, isSelected) {
     <text x="-23" y="2.6" font-size="8" fill="${C.text}" font-family="${FONT}" font-weight="600">${esc(short(w.name, 13))}</text>
   </g>`
 
-  return `<g transform="translate(${x} ${y})" opacity="${w.status === 'done' ? 0.72 : 1}">
+  return `<g opacity="${w.status === 'done' ? 0.72 : 1}">
   <title>${esc(w.name)} (${esc(w.status)}): ${esc(short(w.task, 160))}</title>
-  <g>${enter}
-    ${ring}
+  ${place}
     <g>${motion}
+      ${ring}
       <ellipse cx="0" cy="2" rx="11" ry="3.6" fill="#000" opacity="0.45"/>
       <g transform="translate(-3 -6)"><line x1="0" y1="0" x2="0" y2="7" stroke="${C.text}" stroke-opacity="0.75" stroke-width="2.6" stroke-linecap="round">${legSwing(1, 0)}</line></g>
-      <g transform="translate(3 -6)"><line x1="0" y1="0" x2="0" y2="7" stroke="${C.text}" stroke-opacity="0.75" stroke-width="2.6" stroke-linecap="round">${legSwing(-1, 0.45)}</line></g>
+      <g transform="translate(3 -6)"><line x1="0" y1="0" x2="0" y2="7" stroke="${C.text}" stroke-opacity="0.75" stroke-width="2.6" stroke-linecap="round">${legSwing(-1, 0.21)}</line></g>
       <rect x="-8" y="-25" width="16" height="21" rx="8" fill="${color}" filter="url(#body)"/>
       <rect x="-8" y="-25" width="16" height="21" rx="8" fill="url(#sheen)"/>
       <circle cx="0" cy="-32" r="7" fill="${C.text}"/>
@@ -188,9 +256,9 @@ function person(seat, isSelected) {
         <animate attributeName="x" values="-4.5;1.5;-4.5" dur="${2.5 + (h % 4) * 0.5}s" repeatCount="indefinite"/>
       </rect>
       ${alarm}
+      ${bubble}
+      ${tag}
     </g>
-    ${bubble}
-    ${tag}
   </g>
 </g>`
 }

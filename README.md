@@ -5,7 +5,11 @@ A Claude Code mod (a plugin of function hooks) with two jobs:
 1. **Model routing.** Before each prompt you type, Haiku rates how hard it is and picks the model: simple → Haiku 4.5, moderate → Sonnet 5.5, complex → Opus 5.5.
 2. **Effort is always yours.** The prompt is held until you pick an effort level in a small dialog. The dialog recommends one (Haiku → low, Sonnet → medium, Opus → high), and nothing runs until you click.
 
-It also adds an **Office**: a live, animated map of your session and its subagents. Workers sit at desks while they work, wander the lounge when idle, and move to the archive when done. A router core in the middle shows the model the last prompt went to. Click a worker's name to see what it is doing.
+It also adds an **Office**: a live, animated map of your session and its subagents.
+
+- Workers walk in through a door and follow the office's aisles and corridors to their desks. Idle workers stroll to the coffee, the router, the archive shelf and back.
+- Working agents type at glowing desks while beams carry data to them from the router core in the middle, which shows the model the last prompt went to.
+- Click a worker's name to see what it is doing and to **talk to it**. A message to a subagent goes straight to that agent and resumes it if it had finished. A message to the main session is routed and waits for your effort click, like a typed prompt.
 
 Built for the **Claude Code desktop app** (Code tab). It also runs in the terminal, where the office is drawn as a list instead of a map.
 
@@ -49,6 +53,7 @@ claude --plugin-dir ~/.claude/mods/office-router
 | What | How |
 | --- | --- |
 | Open the office | the **Open office** button above the prompt box, the **Office** label in the footer, or `/office` |
+| Talk to an agent | click its name under the map, type in the box at the bottom of its card, press **Send** |
 | Pick the effort for a prompt | click a level in the **Choose effort** dialog, or press 1–6 (6 keeps your current effort) |
 | Cancel a held prompt | Esc in the dialog: nothing is sent and your text goes back into the prompt box |
 | Turn routing off for this session | `/route off` (prompts go straight through, no dialog) |
@@ -66,8 +71,10 @@ Routing starts in `auto` in every new session. `/route off` lasts only for the s
 - Slash commands and messages you did not type (background task notices, for example) go straight through.
 - Each prompt costs one small Haiku call for the rating and adds about a second before the reply starts.
 - Switching models between turns discards the prompt cache, so long conversations can cost more. Use `/route off` when that matters.
-- The office shows this session and its subagents only. Other sessions are not visible to a mod yet.
-- The desktop redraws the office whenever something changes, so the ambient animations restart on each change. Walking between zones still plays, because the mod remembers where each worker last stood.
+- The office shows this session and its subagents only, so you can talk only to this session's agents. Other sessions are not visible to a mod yet.
+- The mobile app draws no text field yet, so there you can read a worker's conversation but not reply.
+- The desktop redraws the office whenever something changes, so the ambient animations restart on each change. A walk that is cut short by a change shows the worker at its destination.
+- The mod forgets where workers stood when it reloads, so the next drawing walks everyone in from the door again.
 
 ## Develop
 
@@ -76,14 +83,14 @@ claude plugin validate ~/.claude/mods/office-router
 claude plugin test ~/.claude/mods/office-router
 ```
 
-The tests cover routing to each model, the held prompt and the effort dialog, the rule that effort never changes without a click, `/route` pinning and off, subagents being left alone, and the button, pane and map drawing on both the terminal and the desktop.
+The tests cover routing to each model, the held prompt and the effort dialog, the rule that effort never changes without a click, `/route` pinning and off, subagents being left alone, messages to a subagent and to the main session, and the button, pane and map drawing on both the terminal and the desktop.
 
 | File | What it holds |
 | --- | --- |
 | `.claude-plugin/plugin.json` | the manifest |
 | `hooks/hooks.json` | names the hooks module |
 | `hooks/register.tsx` | the hooks: routing, the effort dialog, the office state, the buttons and panes |
-| `hooks/office-map.js` | the animated office map (SVG with SMIL animation, in the ALTERX design language) |
+| `hooks/office-map.js` | the animated office map: lanes, walking and roaming (SVG with SMIL animation, in the ALTERX design language) |
 | `types/index.d.ts` | the mod's state contract |
 | `tests/office.test.tsx` | the test suite |
 

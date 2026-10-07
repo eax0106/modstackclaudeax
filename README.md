@@ -13,6 +13,10 @@ It also adds an **Office**: a live, animated map of your session and its subagen
 
 Built for the **Claude Code desktop app** (Code tab). It also runs in the terminal, where the office is drawn as a list instead of a map.
 
+## Also in this repo
+
+[`self-tracking-tasks-mod/`](self-tracking-tasks-mod/) is a companion mod: a live, animated board of the tasks the model sets for itself and its subagents, with a `Tasks 2/5` button next to the office's. It installs separately; see its README.
+
 ## Requirements
 
 - Claude Code with function-hook mods (tested on 2.1.284 CLI and 2.1.288 desktop). The mod API is early access and may change between releases.
@@ -82,6 +86,8 @@ Routing starts in `auto` in every new session. `/route off` lasts only for the s
 claude plugin validate ~/.claude/mods/office-router
 claude plugin test ~/.claude/mods/office-router
 ```
+
+`claude plugin test` runs every test file under the folder it is given, so at the repo root it also picks up the tasks mod's tests, which fail there. To check only this mod, look at the results for `tests/office.test.tsx`, or run the tasks mod's checks on its own folder.
 
 The tests cover routing to each model, the held prompt and the effort dialog, the rule that effort never changes without a click, `/route` pinning and off, subagents being left alone, messages to a subagent and to the main session, and the button, pane and map drawing on both the terminal and the desktop.
 

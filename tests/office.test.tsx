@@ -24,6 +24,11 @@ function world(on: any, classify: (text: string) => string | undefined) {
   on('ui.status', async () => ({ value: undefined }))
   on('ui.open', async () => ({ value: { isPlaced: true } }))
   on('ui.close', async () => ({ value: undefined }))
+  // The engine's own drawing beneath the plugin, which the footer and strip wrap.
+  on('ui.render', ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text key="engine">engine</Text>
+  })
   on('session.start', async (_$: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('turn.start', async (_$: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
   on('prompt.submit', async (_$: unknown, e: { text: string }) => {
@@ -166,6 +171,7 @@ test('the footer button and the office pane draw on terminal and desktop', async
   for (const surface of ['terminal', 'desktop'] as const) {
     const footer = await $.ui.mount({ ...MODE, surface } as never)
     expect(await footer.find({ key: 'open-office' })).toBeDefined()
+    expect(await footer.find({ type: 'Text', text: /^engine$/ }), 'keeps what is beneath').toBeDefined()
     await footer.unmount()
 
     const strip = await $.ui.mount({
@@ -175,6 +181,7 @@ test('the footer button and the office pane draw on terminal and desktop', async
       surface,
     } as never)
     expect(await strip.find({ key: 'open-office-band' })).toBeDefined()
+    expect(await strip.find({ type: 'Text', text: /^engine$/ }), 'keeps what is beneath').toBeDefined()
     await strip.unmount()
 
     const pane = await $.ui.mount({ ...PANE, surface } as never)

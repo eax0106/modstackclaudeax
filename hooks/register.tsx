@@ -266,15 +266,17 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // The button beside the footer's mode labels.
-  on('ui.render', { component: 'SessionMode' }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+  // The button beside the footer's mode labels, drawn after whatever is beneath
+  // (the engine's labels, another mod's buttons).
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    const below = await next(e)
+    const { Box, Button } = $.ui.resolve(e)
     const cur = await read($, current)
     const m = await read($, mode)
     const label = m === 'off' ? 'Office' : `Office · ${cur?.tier ?? m}`
     return (
       <Box flexDirection="row" gap={1}>
-        {e.props.modes.length > 0 && <Text dimColor>{e.props.modes.join(' & ')}</Text>}
+        {below}
         <Button key="open-office" label={label} plain onPress={() => void $.ui.open(OFFICE)} />
       </Box>
     )
@@ -283,22 +285,26 @@ export const register: Register = on => {
   // The same button in the strip directly above the prompt box.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
+    const below = await next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
     const cur = await read($, current)
     const m = await read($, mode)
     const working = (await read($, workers)).filter(w => w.status === 'working').length
     return (
-      <Box flexDirection="row" gap={1}>
-        <Button
-          key="open-office-band"
-          label="Open office"
-          variant="primary"
-          onPress={() => void $.ui.open(OFFICE)}
-        />
-        <Text dimColor>
-          routing {m}
-          {cur?.tier ? ` · last: ${cur.tier}` : ''} · {working} working
-        </Text>
+      <Box flexDirection="row" gap={2}>
+        <Box flexDirection="row" gap={1}>
+          <Button
+            key="open-office-band"
+            label="Open office"
+            variant="primary"
+            onPress={() => void $.ui.open(OFFICE)}
+          />
+          <Text dimColor>
+            routing {m}
+            {cur?.tier ? ` · last: ${cur.tier}` : ''} · {working} working
+          </Text>
+        </Box>
+        {below}
       </Box>
     )
   })
